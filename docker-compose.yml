@@ -21,6 +21,9 @@ services:
       context: .
     depends_on:
       - etcd
+    environment:
+      ELKGO_PUBLIC_ADDR: http://elkgo1:8081
+      ELKGO_ADD_TEST_DATA: ${ELKGO_ADD_TEST_DATA:-false}
     command:
       - -mode=both
       - -node-id=n1
@@ -37,6 +40,9 @@ services:
       context: .
     depends_on:
       - etcd
+    environment:
+      ELKGO_PUBLIC_ADDR: http://elkgo2:8081
+      ELKGO_ADD_TEST_DATA: ${ELKGO_ADD_TEST_DATA:-false}
     command:
       - -mode=both
       - -node-id=n2
@@ -53,6 +59,9 @@ services:
       context: .
     depends_on:
       - etcd
+    environment:
+      ELKGO_PUBLIC_ADDR: http://elkgo3:8081
+      ELKGO_ADD_TEST_DATA: ${ELKGO_ADD_TEST_DATA:-false}
     command:
       - -mode=both
       - -node-id=n3
@@ -69,6 +78,9 @@ services:
       context: .
     depends_on:
       - etcd
+    environment:
+      ELKGO_PUBLIC_ADDR: http://elkgo4:8081
+      ELKGO_ADD_TEST_DATA: ${ELKGO_ADD_TEST_DATA:-true}
     command:
       - -mode=both
       - -node-id=n4

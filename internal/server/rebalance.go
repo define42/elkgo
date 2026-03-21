@@ -267,7 +267,7 @@ func buildRoutingRebalanceUpdates(members map[string]NodeInfo, routes map[string
 			desiredReplicas := desired[shardID]
 			current, ok := group.byShard[shardID]
 			if ok {
-				desiredReplicas = preserveReplicaOrder(current.Replicas, desiredReplicas)
+				desiredReplicas = rebalanceReplicaOrder(current.Replicas, desiredReplicas)
 			}
 			if ok && sameReplicaSet(current.Replicas, desiredReplicas) {
 				continue
@@ -301,18 +301,30 @@ func buildRoutingRebalanceUpdates(members map[string]NodeInfo, routes map[string
 	return updates
 }
 
-func preserveReplicaOrder(current, desired []string) []string {
+func rebalanceReplicaOrder(current, desired []string) []string {
 	if len(desired) == 0 {
 		return nil
 	}
 
 	desiredSet := make(map[string]struct{}, len(desired))
+	currentSet := make(map[string]struct{}, len(current))
 	for _, replica := range desired {
 		desiredSet[replica] = struct{}{}
+	}
+	for _, replica := range current {
+		currentSet[replica] = struct{}{}
 	}
 
 	ordered := make([]string, 0, len(desired))
 	seen := make(map[string]struct{}, len(desired))
+	for _, replica := range desired {
+		if _, ok := currentSet[replica]; !ok {
+			continue
+		}
+		ordered = append(ordered, replica)
+		seen[replica] = struct{}{}
+		break
+	}
 	for _, replica := range current {
 		if _, ok := desiredSet[replica]; !ok {
 			continue

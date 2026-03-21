@@ -572,12 +572,21 @@ func TestBuildRoutingRebalanceUpdates_ExcludesDrainedNodeWhenCapacityAllows(t *t
 	}
 }
 
-func TestPreserveReplicaOrder_KeepsExistingReplicasAheadOfNewOnes(t *testing.T) {
+func TestRebalanceReplicaOrder_PromotesWarmPrimaryAndKeepsNewReplicasBack(t *testing.T) {
 	current := []string{"n2", "n1", "n3"}
 	desired := []string{"n5", "n2", "n1"}
 
-	got := preserveReplicaOrder(current, desired)
+	got := rebalanceReplicaOrder(current, desired)
 	want := []string{"n2", "n1", "n5"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected replica order: got %v want %v", got, want)
+	}
+
+	current = []string{"n1", "n2", "n3"}
+	desired = []string{"n2", "n5", "n1"}
+
+	got = rebalanceReplicaOrder(current, desired)
+	want = []string{"n2", "n1", "n5"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected replica order: got %v want %v", got, want)
 	}

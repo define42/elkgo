@@ -88,6 +88,25 @@ services:
     ports:
       - "8084:8081"
 
+  elkgo5:
+    build:
+      context: .
+    depends_on:
+      - etcd
+    environment:
+      ELKGO_PUBLIC_ADDR: http://elkgo5:8081
+    command:
+      - -mode=both
+      - -node-id=n5
+      - -listen=:8081
+      - -data=/app/data
+      - -etcd-endpoints=http://etcd:2379
+    volumes:
+      - elkgo5-data:/app/data
+    ports:
+      - "8085:8081"
+
+
   elkgo-testdata:
     build:
       context: .
@@ -111,3 +130,4 @@ volumes:
   elkgo2-data:
   elkgo3-data:
   elkgo4-data:
+  elkgo5-data:

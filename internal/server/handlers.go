@@ -154,6 +154,7 @@ func (s *Server) handleNodeDrain(w http.ResponseWriter, r *http.Request) {
 		state := NodeDrainState{
 			NodeID:      nodeID,
 			RequestedAt: time.Now().UTC().Format(time.RFC3339),
+			Auto:        false,
 		}
 		b, err := json.Marshal(state)
 		if err != nil {

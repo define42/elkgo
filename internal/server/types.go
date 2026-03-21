@@ -14,6 +14,7 @@ type Document map[string]interface{}
 type NodeInfo struct {
 	ID             string `json:"id"`
 	Addr           string `json:"addr"`
+	StartedAt      string `json:"started_at,omitempty"`
 	DrainRequested bool   `json:"drain_requested"`
 }
 
@@ -37,6 +38,13 @@ type MemberLease struct {
 type NodeDrainState struct {
 	NodeID      string `json:"node_id"`
 	RequestedAt string `json:"requested_at"`
+	Auto        bool   `json:"auto,omitempty"`
+}
+
+type NodeOfflineState struct {
+	NodeID       string `json:"node_id"`
+	Addr         string `json:"addr"`
+	MissingSince string `json:"missing_since"`
 }
 
 type ShardHit struct {
@@ -145,6 +153,12 @@ type Server struct {
 	memberLeaseID     clientv3.LeaseID
 	memberLeaseCancel context.CancelFunc
 
+	drainMu     sync.RWMutex
+	drainStates map[string]NodeDrainState
+
+	offlineMu     sync.RWMutex
+	offlineStates map[string]NodeOfflineState
+
 	routingMu sync.RWMutex
 	routing   map[string]RoutingEntry
 
@@ -155,4 +169,5 @@ type Server struct {
 	routingPrefix     string
 	memberPrefix      string
 	drainPrefix       string
+	offlinePrefix     string
 }

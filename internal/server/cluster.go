@@ -77,13 +77,38 @@ func (s *Server) loadMembers(ctx context.Context) error {
 		members[m.NodeID] = NodeInfo{
 			ID:             m.NodeID,
 			Addr:           strings.TrimRight(m.Addr, "/"),
+			StartedAt:      strings.TrimSpace(m.StartedAt),
 			DrainRequested: drainRequested,
 		}
 	}
 	s.membersMu.Lock()
 	s.members = members
 	s.membersMu.Unlock()
+	s.drainMu.Lock()
+	s.drainStates = drained
+	s.drainMu.Unlock()
 	s.clearReplicaCache()
+	return nil
+}
+
+func (s *Server) loadOfflineStates(ctx context.Context) error {
+	resp, err := s.etcd.Get(ctx, s.offlinePrefix, clientv3.WithPrefix())
+	if err != nil {
+		return err
+	}
+
+	offline := make(map[string]NodeOfflineState, len(resp.Kvs))
+	for _, kv := range resp.Kvs {
+		var state NodeOfflineState
+		if err := json.Unmarshal(kv.Value, &state); err != nil {
+			continue
+		}
+		offline[state.NodeID] = state
+	}
+
+	s.offlineMu.Lock()
+	s.offlineStates = offline
+	s.offlineMu.Unlock()
 	return nil
 }
 
@@ -94,11 +119,21 @@ func (s *Server) watchMembers(ctx context.Context) {
 			log.Printf("watch members error: %v", wr.Err())
 			continue
 		}
+		previousMembers := s.snapshotMembers()
 		if err := s.loadMembers(context.Background()); err != nil {
 			log.Printf("load members failed: %v", err)
 			continue
 		}
-		go s.maybeRebalanceRouting(context.Background())
+		currentMembers := s.snapshotMembers()
+		if err := s.reconcileOfflineMarkers(context.Background(), previousMembers, currentMembers); err != nil {
+			log.Printf("reconcile offline markers failed: %v", err)
+		}
+		if err := s.loadOfflineStates(context.Background()); err != nil {
+			log.Printf("load offline states after member update failed: %v", err)
+		}
+		if shouldRebalanceForMemberChange(previousMembers, currentMembers) {
+			go s.maybeRebalanceRouting(context.Background())
+		}
 	}
 }
 
@@ -114,6 +149,46 @@ func (s *Server) watchDrainStates(ctx context.Context) {
 			continue
 		}
 		go s.maybeRebalanceRouting(context.Background())
+	}
+}
+
+func (s *Server) watchOfflineStates(ctx context.Context) {
+	watchCh := s.etcd.Watch(ctx, s.offlinePrefix, clientv3.WithPrefix())
+	for wr := range watchCh {
+		if wr.Err() != nil {
+			log.Printf("watch offline states error: %v", wr.Err())
+			continue
+		}
+		if err := s.loadOfflineStates(context.Background()); err != nil {
+			log.Printf("load offline states failed: %v", err)
+		}
+	}
+}
+
+func (s *Server) offlineDrainLoop(ctx context.Context) {
+	ticker := time.NewTicker(offlineDrainCheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			changed, err := s.maybeAutoDrainExpiredOfflineNodes(context.Background())
+			if err != nil {
+				log.Printf("auto-drain offline nodes failed: %v", err)
+				continue
+			}
+			resumed, err := s.maybeAutoResumeRecoveredNodes(context.Background())
+			if err != nil {
+				log.Printf("auto-resume recovered nodes failed: %v", err)
+				continue
+			}
+			changed = changed || resumed
+			if changed {
+				go s.maybeRebalanceRouting(context.Background())
+			}
+		}
 	}
 }
 
@@ -200,4 +275,96 @@ func (s *Server) bootstrapRouting(ctx context.Context, indexName, day string, rf
 	}
 	_ = s.loadRouting(context.Background())
 	return created, nil
+}
+
+func (s *Server) reconcileOfflineMarkers(ctx context.Context, previousMembers, currentMembers map[string]NodeInfo) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	offline := s.snapshotOfflineStates()
+
+	for nodeID, member := range previousMembers {
+		if _, stillPresent := currentMembers[nodeID]; stillPresent {
+			continue
+		}
+		if _, alreadyMarked := offline[nodeID]; alreadyMarked {
+			continue
+		}
+
+		state := NodeOfflineState{
+			NodeID:       nodeID,
+			Addr:         strings.TrimRight(member.Addr, "/"),
+			MissingSince: now,
+		}
+		b, err := json.Marshal(state)
+		if err != nil {
+			return err
+		}
+		if _, err := s.etcd.Put(ctx, s.offlinePrefix+nodeID, string(b)); err != nil {
+			return err
+		}
+		offline[nodeID] = state
+	}
+
+	for nodeID := range currentMembers {
+		if _, markedOffline := offline[nodeID]; !markedOffline {
+			continue
+		}
+		if _, err := s.etcd.Delete(ctx, s.offlinePrefix+nodeID); err != nil {
+			return err
+		}
+		delete(offline, nodeID)
+	}
+
+	return nil
+}
+
+func (s *Server) ensureOfflineMarkersForMissingRouteReplicas(ctx context.Context) error {
+	activeMembers := s.snapshotMembers()
+	offline := s.snapshotOfflineStates()
+	drained := s.snapshotDrainStates()
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	for _, route := range s.snapshotRouting() {
+		for _, nodeID := range route.Replicas {
+			if nodeID == "" {
+				continue
+			}
+			if _, ok := activeMembers[nodeID]; ok {
+				continue
+			}
+			if _, ok := offline[nodeID]; ok {
+				continue
+			}
+			if _, ok := drained[nodeID]; ok {
+				continue
+			}
+
+			state := NodeOfflineState{
+				NodeID:       nodeID,
+				MissingSince: now,
+			}
+			b, err := json.Marshal(state)
+			if err != nil {
+				return err
+			}
+			if _, err := s.etcd.Put(ctx, s.offlinePrefix+nodeID, string(b)); err != nil {
+				return err
+			}
+			offline[nodeID] = state
+		}
+	}
+
+	return nil
+}
+
+func shouldRebalanceForMemberChange(previousMembers, currentMembers map[string]NodeInfo) bool {
+	for nodeID, member := range currentMembers {
+		previous, ok := previousMembers[nodeID]
+		if !ok {
+			return true
+		}
+		if strings.TrimRight(previous.Addr, "/") != strings.TrimRight(member.Addr, "/") {
+			return true
+		}
+	}
+	return false
 }

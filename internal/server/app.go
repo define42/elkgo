@@ -24,10 +24,13 @@ func New(cfg Config) *Server {
 		etcdEndpoints:       append([]string(nil), cfg.ETCDEndpoints...),
 		routing:             map[string]RoutingEntry{},
 		members:             map[string]NodeInfo{},
+		drainStates:         map[string]NodeDrainState{},
+		offlineStates:       map[string]NodeOfflineState{},
 		replicationFactor:   cfg.ReplicationFactor,
 		routingPrefix:       "/distsearch/routing/",
 		memberPrefix:        "/distsearch/members/",
 		drainPrefix:         "/distsearch/drain/",
+		offlinePrefix:       "/distsearch/offline/",
 	}
 }
 
@@ -42,13 +45,24 @@ func (s *Server) Run() error {
 	if err := s.loadMembers(ctx); err != nil {
 		return err
 	}
+	if err := s.loadOfflineStates(ctx); err != nil {
+		return err
+	}
 	if err := s.loadRouting(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureOfflineMarkersForMissingRouteReplicas(ctx); err != nil {
+		return err
+	}
+	if err := s.loadOfflineStates(ctx); err != nil {
 		return err
 	}
 
 	go s.watchMembers(context.Background())
 	go s.watchDrainStates(context.Background())
+	go s.watchOfflineStates(context.Background())
 	go s.watchRouting(context.Background())
+	go s.offlineDrainLoop(context.Background())
 
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)

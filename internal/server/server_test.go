@@ -572,6 +572,198 @@ func TestBuildRoutingRebalanceUpdates_ExcludesDrainedNodeWhenCapacityAllows(t *t
 	}
 }
 
+func TestPreserveReplicaOrder_KeepsExistingReplicasAheadOfNewOnes(t *testing.T) {
+	current := []string{"n2", "n1", "n3"}
+	desired := []string{"n5", "n2", "n1"}
+
+	got := preserveReplicaOrder(current, desired)
+	want := []string{"n2", "n1", "n5"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected replica order: got %v want %v", got, want)
+	}
+}
+
+func TestHasRecentOfflineNodes_RespectsGraceDrainAndRecovery(t *testing.T) {
+	now := time.Date(2026, 3, 21, 12, 0, 0, 0, time.UTC)
+
+	s := New(Config{
+		Mode:              "both",
+		NodeID:            "n1",
+		Listen:            ":0",
+		DataDir:           t.TempDir(),
+		ReplicationFactor: 1,
+	})
+	defer s.Close()
+
+	s.offlineMu.Lock()
+	s.offlineStates = map[string]NodeOfflineState{
+		"n2": {
+			NodeID:       "n2",
+			Addr:         "http://n2:8081",
+			MissingSince: now.Add(-10 * time.Minute).Format(time.RFC3339),
+		},
+	}
+	s.offlineMu.Unlock()
+
+	if !s.hasRecentOfflineNodes(now) {
+		t.Fatalf("expected recent offline node to block rebalance")
+	}
+
+	s.drainMu.Lock()
+	s.drainStates = map[string]NodeDrainState{
+		"n2": {
+			NodeID:      "n2",
+			RequestedAt: now.Format(time.RFC3339),
+		},
+	}
+	s.drainMu.Unlock()
+
+	if s.hasRecentOfflineNodes(now) {
+		t.Fatalf("expected drained offline node to stop blocking rebalance")
+	}
+
+	s.drainMu.Lock()
+	s.drainStates = map[string]NodeDrainState{}
+	s.drainMu.Unlock()
+	s.membersMu.Lock()
+	s.members = map[string]NodeInfo{
+		"n2": {ID: "n2", Addr: "http://n2:8081"},
+	}
+	s.membersMu.Unlock()
+
+	if s.hasRecentOfflineNodes(now) {
+		t.Fatalf("expected recovered node to stop blocking rebalance")
+	}
+}
+
+func TestOfflineStateExpired_AfterGracePeriod(t *testing.T) {
+	now := time.Date(2026, 3, 21, 12, 0, 0, 0, time.UTC)
+
+	recent := NodeOfflineState{
+		NodeID:       "n2",
+		MissingSince: now.Add(-14*time.Minute - 59*time.Second).Format(time.RFC3339),
+	}
+	if offlineStateExpired(recent, now) {
+		t.Fatalf("expected node within grace period to stay non-expired")
+	}
+
+	expired := NodeOfflineState{
+		NodeID:       "n2",
+		MissingSince: now.Add(-15 * time.Minute).Format(time.RFC3339),
+	}
+	if !offlineStateExpired(expired, now) {
+		t.Fatalf("expected node at grace threshold to expire")
+	}
+
+	invalid := NodeOfflineState{
+		NodeID:       "n2",
+		MissingSince: "not-a-time",
+	}
+	if !offlineStateExpired(invalid, now) {
+		t.Fatalf("expected invalid offline marker timestamp to expire defensively")
+	}
+}
+
+func TestMemberOnlineStable_AfterGracePeriod(t *testing.T) {
+	now := time.Date(2026, 3, 22, 10, 0, 0, 0, time.UTC)
+
+	recent := NodeInfo{
+		ID:        "n2",
+		StartedAt: now.Add(-14*time.Minute - 59*time.Second).Format(time.RFC3339),
+	}
+	if memberOnlineStable(recent, now) {
+		t.Fatalf("expected node within online grace period to stay non-stable")
+	}
+
+	stable := NodeInfo{
+		ID:        "n2",
+		StartedAt: now.Add(-15 * time.Minute).Format(time.RFC3339),
+	}
+	if !memberOnlineStable(stable, now) {
+		t.Fatalf("expected node at online grace threshold to become stable")
+	}
+
+	invalid := NodeInfo{
+		ID:        "n2",
+		StartedAt: "not-a-time",
+	}
+	if memberOnlineStable(invalid, now) {
+		t.Fatalf("expected invalid started_at to stay non-stable")
+	}
+}
+
+func TestAutoResumableNodes_OnlyResumesAutoDrainsAfterOnlineGrace(t *testing.T) {
+	now := time.Date(2026, 3, 22, 10, 0, 0, 0, time.UTC)
+
+	members := map[string]NodeInfo{
+		"n2": {
+			ID:        "n2",
+			Addr:      "http://n2:8081",
+			StartedAt: now.Add(-16 * time.Minute).Format(time.RFC3339),
+		},
+		"n3": {
+			ID:        "n3",
+			Addr:      "http://n3:8081",
+			StartedAt: now.Add(-10 * time.Minute).Format(time.RFC3339),
+		},
+		"n4": {
+			ID:        "n4",
+			Addr:      "http://n4:8081",
+			StartedAt: now.Add(-20 * time.Minute).Format(time.RFC3339),
+		},
+	}
+	drainStates := map[string]NodeDrainState{
+		"n2": {
+			NodeID:      "n2",
+			RequestedAt: now.Add(-30 * time.Minute).Format(time.RFC3339),
+			Auto:        true,
+		},
+		"n3": {
+			NodeID:      "n3",
+			RequestedAt: now.Add(-30 * time.Minute).Format(time.RFC3339),
+			Auto:        true,
+		},
+		"n4": {
+			NodeID:      "n4",
+			RequestedAt: now.Add(-30 * time.Minute).Format(time.RFC3339),
+			Auto:        false,
+		},
+		"n5": {
+			NodeID:      "n5",
+			RequestedAt: now.Add(-30 * time.Minute).Format(time.RFC3339),
+			Auto:        true,
+		},
+	}
+
+	got := autoResumableNodes(members, drainStates, now)
+	want := []string{"n2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected auto-resumable nodes: got %v want %v", got, want)
+	}
+}
+
+func TestShouldRebalanceForMemberChange_IgnoresRemovalButHandlesAddition(t *testing.T) {
+	previous := map[string]NodeInfo{
+		"n1": {ID: "n1", Addr: "http://n1:8081"},
+		"n2": {ID: "n2", Addr: "http://n2:8081"},
+	}
+	currentWithoutN2 := map[string]NodeInfo{
+		"n1": {ID: "n1", Addr: "http://n1:8081"},
+	}
+	if shouldRebalanceForMemberChange(previous, currentWithoutN2) {
+		t.Fatalf("expected member removal alone to wait for offline drain grace period")
+	}
+
+	currentWithNewNode := map[string]NodeInfo{
+		"n1": {ID: "n1", Addr: "http://n1:8081"},
+		"n2": {ID: "n2", Addr: "http://n2:8081"},
+		"n3": {ID: "n3", Addr: "http://n3:8081"},
+	}
+	if !shouldRebalanceForMemberChange(previous, currentWithNewNode) {
+		t.Fatalf("expected new member to trigger rebalance")
+	}
+}
+
 func TestHandleAvailableIndexes_ReturnsSortedIndexesAndDays(t *testing.T) {
 	s := New(Config{
 		Mode:              "both",

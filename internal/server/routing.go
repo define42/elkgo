@@ -59,6 +59,26 @@ func (s *Server) snapshotMembers() map[string]NodeInfo {
 	return out
 }
 
+func (s *Server) snapshotDrainStates() map[string]NodeDrainState {
+	s.drainMu.RLock()
+	defer s.drainMu.RUnlock()
+	out := make(map[string]NodeDrainState, len(s.drainStates))
+	for k, v := range s.drainStates {
+		out[k] = v
+	}
+	return out
+}
+
+func (s *Server) snapshotOfflineStates() map[string]NodeOfflineState {
+	s.offlineMu.RLock()
+	defer s.offlineMu.RUnlock()
+	out := make(map[string]NodeOfflineState, len(s.offlineStates))
+	for k, v := range s.offlineStates {
+		out[k] = v
+	}
+	return out
+}
+
 func (s *Server) memberAddr(nodeID string) (string, bool) {
 	s.membersMu.RLock()
 	defer s.membersMu.RUnlock()

@@ -16,10 +16,13 @@ import (
 )
 
 const (
-	rebalanceElectionPath = "/distsearch/admin/rebalance"
-	shardSyncConcurrency  = 4
-	shardSyncBatchSize    = 500
-	shardSyncTimeout      = 5 * time.Minute
+	rebalanceElectionPath     = "/distsearch/admin/rebalance"
+	shardSyncConcurrency      = 4
+	shardSyncBatchSize        = 500
+	shardSyncTimeout          = 5 * time.Minute
+	offlineDrainGracePeriod   = 15 * time.Minute
+	onlineResumeGracePeriod   = 15 * time.Minute
+	offlineDrainCheckInterval = time.Minute
 )
 
 type shardSyncTask struct {
@@ -41,6 +44,18 @@ func (s *Server) maybeRebalanceRouting(ctx context.Context) {
 
 	routes := s.snapshotRouting()
 	if len(routes) == 0 {
+		return
+	}
+
+	if _, err := s.maybeAutoDrainExpiredOfflineNodes(ctx); err != nil {
+		log.Printf("auto-drain check failed before rebalance: %v", err)
+		return
+	}
+	if _, err := s.maybeAutoResumeRecoveredNodes(ctx); err != nil {
+		log.Printf("auto-resume check failed before rebalance: %v", err)
+		return
+	}
+	if s.hasRecentOfflineNodes(time.Now().UTC()) {
 		return
 	}
 
@@ -86,6 +101,146 @@ func (s *Server) rebalanceRouting(ctx context.Context) error {
 	return nil
 }
 
+func (s *Server) maybeAutoDrainExpiredOfflineNodes(ctx context.Context) (bool, error) {
+	if !s.isCoordinatorMode() {
+		return false, nil
+	}
+
+	offlineStates := s.snapshotOfflineStates()
+	if len(offlineStates) == 0 {
+		return false, nil
+	}
+
+	activeMembers := s.snapshotMembers()
+	drainStates := s.snapshotDrainStates()
+	now := time.Now().UTC()
+	changed := false
+
+	nodeIDs := make([]string, 0, len(offlineStates))
+	for nodeID := range offlineStates {
+		nodeIDs = append(nodeIDs, nodeID)
+	}
+	sort.Strings(nodeIDs)
+
+	for _, nodeID := range nodeIDs {
+		if _, active := activeMembers[nodeID]; active {
+			continue
+		}
+		if _, drained := drainStates[nodeID]; drained {
+			continue
+		}
+
+		state := offlineStates[nodeID]
+		if !offlineStateExpired(state, now) {
+			continue
+		}
+
+		drainState := NodeDrainState{
+			NodeID:      nodeID,
+			RequestedAt: now.Format(time.RFC3339),
+			Auto:        true,
+		}
+		b, err := json.Marshal(drainState)
+		if err != nil {
+			return changed, err
+		}
+		if _, err := s.etcd.Put(ctx, s.drainPrefix+nodeID, string(b)); err != nil {
+			return changed, err
+		}
+		changed = true
+	}
+
+	if changed {
+		if err := s.loadMembers(context.Background()); err != nil {
+			return true, err
+		}
+	}
+
+	return changed, nil
+}
+
+func (s *Server) maybeAutoResumeRecoveredNodes(ctx context.Context) (bool, error) {
+	if !s.isCoordinatorMode() {
+		return false, nil
+	}
+
+	members := s.snapshotMembers()
+	drainStates := s.snapshotDrainStates()
+	now := time.Now().UTC()
+	resumeNodeIDs := autoResumableNodes(members, drainStates, now)
+	if len(resumeNodeIDs) == 0 {
+		return false, nil
+	}
+
+	for _, nodeID := range resumeNodeIDs {
+		if _, err := s.etcd.Delete(ctx, s.drainPrefix+nodeID); err != nil {
+			return false, err
+		}
+	}
+
+	if err := s.loadMembers(context.Background()); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func (s *Server) hasRecentOfflineNodes(now time.Time) bool {
+	offlineStates := s.snapshotOfflineStates()
+	if len(offlineStates) == 0 {
+		return false
+	}
+
+	activeMembers := s.snapshotMembers()
+	drainStates := s.snapshotDrainStates()
+	for nodeID, state := range offlineStates {
+		if _, active := activeMembers[nodeID]; active {
+			continue
+		}
+		if _, drained := drainStates[nodeID]; drained {
+			continue
+		}
+		if !offlineStateExpired(state, now) {
+			return true
+		}
+	}
+	return false
+}
+
+func offlineStateExpired(state NodeOfflineState, now time.Time) bool {
+	missingSince, err := time.Parse(time.RFC3339, strings.TrimSpace(state.MissingSince))
+	if err != nil {
+		return true
+	}
+	return !missingSince.After(now.Add(-offlineDrainGracePeriod))
+}
+
+func autoResumableNodes(members map[string]NodeInfo, drainStates map[string]NodeDrainState, now time.Time) []string {
+	resumeNodeIDs := make([]string, 0)
+	for nodeID, drainState := range drainStates {
+		if !drainState.Auto {
+			continue
+		}
+		member, ok := members[nodeID]
+		if !ok {
+			continue
+		}
+		if !memberOnlineStable(member, now) {
+			continue
+		}
+		resumeNodeIDs = append(resumeNodeIDs, nodeID)
+	}
+	sort.Strings(resumeNodeIDs)
+	return resumeNodeIDs
+}
+
+func memberOnlineStable(member NodeInfo, now time.Time) bool {
+	startedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(member.StartedAt))
+	if err != nil {
+		return false
+	}
+	return !startedAt.After(now.Add(-onlineResumeGracePeriod))
+}
+
 func buildRoutingRebalanceUpdates(members map[string]NodeInfo, routes map[string]RoutingEntry) []RoutingEntry {
 	if len(members) == 0 || len(routes) == 0 {
 		return nil
@@ -111,6 +266,9 @@ func buildRoutingRebalanceUpdates(members map[string]NodeInfo, routes map[string
 		for shardID := 0; shardID < enforcedShardsPerDay; shardID++ {
 			desiredReplicas := desired[shardID]
 			current, ok := group.byShard[shardID]
+			if ok {
+				desiredReplicas = preserveReplicaOrder(current.Replicas, desiredReplicas)
+			}
 			if ok && sameReplicaSet(current.Replicas, desiredReplicas) {
 				continue
 			}
@@ -141,6 +299,37 @@ func buildRoutingRebalanceUpdates(members map[string]NodeInfo, routes map[string
 	})
 
 	return updates
+}
+
+func preserveReplicaOrder(current, desired []string) []string {
+	if len(desired) == 0 {
+		return nil
+	}
+
+	desiredSet := make(map[string]struct{}, len(desired))
+	for _, replica := range desired {
+		desiredSet[replica] = struct{}{}
+	}
+
+	ordered := make([]string, 0, len(desired))
+	seen := make(map[string]struct{}, len(desired))
+	for _, replica := range current {
+		if _, ok := desiredSet[replica]; !ok {
+			continue
+		}
+		if _, ok := seen[replica]; ok {
+			continue
+		}
+		ordered = append(ordered, replica)
+		seen[replica] = struct{}{}
+	}
+	for _, replica := range desired {
+		if _, ok := seen[replica]; ok {
+			continue
+		}
+		ordered = append(ordered, replica)
+	}
+	return ordered
 }
 
 func routingCandidateNodes(members map[string]NodeInfo, rf int) []NodeInfo {

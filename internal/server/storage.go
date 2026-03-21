@@ -97,32 +97,10 @@ func buildIndexMapping() blevemapping.IndexMapping {
 	indexMapping := bleve.NewIndexMapping()
 	indexMapping.DefaultAnalyzer = "standard"
 	docMapping := bleve.NewDocumentMapping()
-	textField := bleve.NewTextFieldMapping()
-	textField.Store = true
-	textField.Index = true
-	textField.IncludeInAll = true
-	keywordField := bleve.NewTextFieldMapping()
-	keywordField.Store = true
-	keywordField.Index = true
-	keywordField.Analyzer = "keyword"
-	numField := bleve.NewNumericFieldMapping()
-	numField.Store = true
-	numField.Index = true
-	dateField := bleve.NewDateTimeFieldMapping()
-	dateField.Store = true
-	dateField.Index = true
 	docMapping.Dynamic = true
+	keywordField := bleve.NewKeywordFieldMapping()
 	docMapping.AddFieldMappingsAt("id", keywordField)
-	docMapping.AddFieldMappingsAt("title", textField)
-	docMapping.AddFieldMappingsAt("body", textField)
-	docMapping.AddFieldMappingsAt("message", textField)
-	docMapping.AddFieldMappingsAt("tags", textField)
-	docMapping.AddFieldMappingsAt("timestamp", dateField)
-	docMapping.AddFieldMappingsAt("created", dateField)
-	docMapping.AddFieldMappingsAt("event_time", dateField)
 	docMapping.AddFieldMappingsAt("partition_day", keywordField)
-	docMapping.AddFieldMappingsAt("count", numField)
-	docMapping.AddFieldMappingsAt("score", numField)
 	indexMapping.DefaultMapping = docMapping
 	return indexMapping
 }
@@ -136,18 +114,6 @@ func normalizeGenericDocument(doc Document) (string, string, error) {
 		return "", "", errors.New("document must contain a non-empty string field: id")
 	}
 	doc["id"] = id
-	if title, ok := doc["title"]; ok {
-		doc["title"] = fmt.Sprint(title)
-	}
-	if body, ok := doc["body"]; ok {
-		doc["body"] = fmt.Sprint(body)
-	}
-	if msg, ok := doc["message"]; ok {
-		doc["message"] = fmt.Sprint(msg)
-	}
-	if tags, ok := doc["tags"]; ok {
-		doc["tags"] = normalizeStringArray(tags)
-	}
 	day, err := extractEventDay(doc)
 	if err != nil {
 		return "", "", err
@@ -183,21 +149,4 @@ func parseTimeValue(v interface{}) (time.Time, error) {
 func asString(v interface{}) (string, bool) {
 	s, ok := v.(string)
 	return s, ok
-}
-
-func normalizeStringArray(v interface{}) []string {
-	switch x := v.(type) {
-	case []string:
-		return append([]string(nil), x...)
-	case []interface{}:
-		out := make([]string, 0, len(x))
-		for _, e := range x {
-			out = append(out, fmt.Sprint(e))
-		}
-		return out
-	case string:
-		return []string{x}
-	default:
-		return []string{fmt.Sprint(v)}
-	}
 }

@@ -222,6 +222,68 @@ func TestHandleBulkIngest_BatchesReplicaWritesByShard(t *testing.T) {
 	}
 }
 
+func TestHandleSearch_GenericNumericAndDateFields(t *testing.T) {
+	s, ts := newTestHTTPServer(t)
+
+	day := "2026-03-21"
+	setTestRoute(s, "events", day, 0, []string{"n1"})
+
+	indexTestDocument(t, s, "events", day, 0, "generic-a", Document{
+		"id":          "generic-a",
+		"timestamp":   day + "T09:00:00Z",
+		"latency_ms":  123,
+		"observed_at": "2026-03-21T09:00:00Z",
+		"service":     "api",
+	})
+	indexTestDocument(t, s, "events", day, 0, "generic-b", Document{
+		"id":          "generic-b",
+		"timestamp":   day + "T09:05:00Z",
+		"latency_ms":  12,
+		"observed_at": "2026-03-20T23:00:00Z",
+		"service":     "worker",
+	})
+
+	numericResp, err := http.Get(ts.URL + "/search?index=events&day=" + url.QueryEscape(day) + "&q=" + url.QueryEscape("latency_ms:>=100") + "&k=10")
+	if err != nil {
+		t.Fatalf("numeric search request failed: %v", err)
+	}
+	defer numericResp.Body.Close()
+
+	if numericResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected numeric search status 200, got %d", numericResp.StatusCode)
+	}
+
+	var numericPayload struct {
+		Hits []ShardHit `json:"hits"`
+	}
+	if err := json.NewDecoder(numericResp.Body).Decode(&numericPayload); err != nil {
+		t.Fatalf("decode numeric search response: %v", err)
+	}
+	if len(numericPayload.Hits) != 1 || numericPayload.Hits[0].DocID != "generic-a" {
+		t.Fatalf("unexpected numeric search hits: %#v", numericPayload.Hits)
+	}
+
+	dateResp, err := http.Get(ts.URL + "/search?index=events&day=" + url.QueryEscape(day) + "&q=" + url.QueryEscape(`observed_at:>="2026-03-21T00:00:00Z"`) + "&k=10")
+	if err != nil {
+		t.Fatalf("date search request failed: %v", err)
+	}
+	defer dateResp.Body.Close()
+
+	if dateResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected date search status 200, got %d", dateResp.StatusCode)
+	}
+
+	var datePayload struct {
+		Hits []ShardHit `json:"hits"`
+	}
+	if err := json.NewDecoder(dateResp.Body).Decode(&datePayload); err != nil {
+		t.Fatalf("decode date search response: %v", err)
+	}
+	if len(datePayload.Hits) != 1 || datePayload.Hits[0].DocID != "generic-a" {
+		t.Fatalf("unexpected date search hits: %#v", datePayload.Hits)
+	}
+}
+
 func TestHandleAvailableIndexes_ReturnsSortedIndexesAndDays(t *testing.T) {
 	s := New(Config{
 		Mode:              "both",
@@ -317,7 +379,7 @@ func TestHandleRouting_WithStatsIncludesShardEventCounts(t *testing.T) {
 	}
 }
 
-func TestNormalizeGenericDocument_NormalizesMappedFieldsAndPartitionDay(t *testing.T) {
+func TestNormalizeGenericDocument_PreservesGenericFieldsAndPartitionDay(t *testing.T) {
 	doc := Document{
 		"id":        "evt-1",
 		"timestamp": "2026-03-21T12:34:56Z",
@@ -341,17 +403,17 @@ func TestNormalizeGenericDocument_NormalizesMappedFieldsAndPartitionDay(t *testi
 	if got := doc["partition_day"]; got != "2026-03-21" {
 		t.Fatalf("expected partition_day to be set, got %#v", got)
 	}
-	if got := doc["title"]; got != "123" {
-		t.Fatalf("expected title to be stringified, got %#v", got)
+	if got := doc["title"]; got != 123 {
+		t.Fatalf("expected title to keep original type, got %#v", got)
 	}
-	if got := doc["body"]; got != "true" {
-		t.Fatalf("expected body to be stringified, got %#v", got)
+	if got := doc["body"]; got != true {
+		t.Fatalf("expected body to keep original type, got %#v", got)
 	}
-	if got := doc["message"]; got != "456" {
-		t.Fatalf("expected message to be stringified, got %#v", got)
+	if got := doc["message"]; got != 456 {
+		t.Fatalf("expected message to keep original type, got %#v", got)
 	}
-	if !reflect.DeepEqual(doc["tags"], []string{"prod", "9", "true"}) {
-		t.Fatalf("expected tags to be normalized, got %#v", doc["tags"])
+	if !reflect.DeepEqual(doc["tags"], []interface{}{"prod", 9, true}) {
+		t.Fatalf("expected tags to keep original shape, got %#v", doc["tags"])
 	}
 }
 

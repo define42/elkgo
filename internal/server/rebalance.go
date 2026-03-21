@@ -281,9 +281,6 @@ func buildRoutingRebalanceUpdates(members map[string]NodeInfo, routes map[string
 				Version:   versionBase + int64(len(updates)+1),
 				UpdatedAt: updatedAt,
 			}
-			if ok {
-				entry.Version = versionBase + int64(len(updates)+1)
-			}
 			updates = append(updates, entry)
 		}
 	}

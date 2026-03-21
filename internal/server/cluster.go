@@ -62,6 +62,7 @@ func (s *Server) loadMembers(ctx context.Context) error {
 	for _, kv := range drainResp.Kvs {
 		var state NodeDrainState
 		if err := json.Unmarshal(kv.Value, &state); err != nil {
+			log.Printf("loadMembers: skip malformed drain entry key=%s: %v", string(kv.Key), err)
 			continue
 		}
 		drained[state.NodeID] = state
@@ -71,12 +72,13 @@ func (s *Server) loadMembers(ctx context.Context) error {
 	for _, kv := range resp.Kvs {
 		var m MemberLease
 		if err := json.Unmarshal(kv.Value, &m); err != nil {
+			log.Printf("loadMembers: skip malformed member entry key=%s: %v", string(kv.Key), err)
 			continue
 		}
 		_, drainRequested := drained[m.NodeID]
 		members[m.NodeID] = NodeInfo{
 			ID:             m.NodeID,
-			Addr:           strings.TrimRight(m.Addr, "/"),
+			Addr:           strings.TrimRight(strings.TrimSpace(m.Addr), "/"),
 			StartedAt:      strings.TrimSpace(m.StartedAt),
 			DrainRequested: drainRequested,
 		}
@@ -101,6 +103,7 @@ func (s *Server) loadOfflineStates(ctx context.Context) error {
 	for _, kv := range resp.Kvs {
 		var state NodeOfflineState
 		if err := json.Unmarshal(kv.Value, &state); err != nil {
+			log.Printf("loadOfflineStates: skip malformed offline entry key=%s: %v", string(kv.Key), err)
 			continue
 		}
 		offline[state.NodeID] = state
@@ -201,6 +204,7 @@ func (s *Server) loadRouting(ctx context.Context) error {
 	for _, kv := range resp.Kvs {
 		var rt RoutingEntry
 		if err := json.Unmarshal(kv.Value, &rt); err != nil {
+			log.Printf("loadRouting: skip malformed routing entry key=%s: %v", string(kv.Key), err)
 			continue
 		}
 		routing[routingMapKey(rt.IndexName, rt.Day, rt.ShardID)] = rt
@@ -221,7 +225,9 @@ func (s *Server) watchRouting(ctx context.Context) {
 			log.Printf("watch routing error: %v", wr.Err())
 			continue
 		}
-		_ = s.loadRouting(context.Background())
+		if err := s.loadRouting(context.Background()); err != nil {
+			log.Printf("load routing after watch update failed: %v", err)
+		}
 	}
 }
 

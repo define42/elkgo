@@ -13,6 +13,45 @@ import (
 	"time"
 )
 
+func TestWriteJSON_WritesValidResponse(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeJSON(rec, http.StatusOK, map[string]string{"msg": "hello"})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected Content-Type application/json, got %q", ct)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["msg"] != "hello" {
+		t.Fatalf("expected msg hello, got %q", body["msg"])
+	}
+}
+
+func TestPublicAddrFromListen_TrimsSpacesAndSlashes(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{":8081", "http://127.0.0.1:8081"},
+		{"http://example.com/", "http://example.com"},
+		{" :9090 ", "http://127.0.0.1:9090"},
+		{"https://host:443/", "https://host:443"},
+		{"host:8080", "http://host:8080"},
+	}
+	for _, tt := range tests {
+		got := publicAddrFromListen(tt.input)
+		if got != tt.want {
+			t.Errorf("publicAddrFromListen(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 func TestHandleSearch_BlankQueryAcrossDayRangeReturnsAllDocuments(t *testing.T) {
 	s, ts := newTestHTTPServer(t)
 
@@ -517,6 +556,50 @@ func TestBuildRoutingRebalanceUpdates_AddsNewNodeToExistingDay(t *testing.T) {
 
 	if n5ShardCount == 0 {
 		t.Fatalf("expected rebalanced routing to assign shards to n5")
+	}
+}
+
+func TestBuildRoutingRebalanceUpdates_VersionsAreMonotonicallyIncreasing(t *testing.T) {
+	day := "2026-03-21"
+	indexName := "events"
+
+	members := map[string]NodeInfo{
+		"n1": {ID: "n1", Addr: "http://n1:8081"},
+		"n2": {ID: "n2", Addr: "http://n2:8081"},
+		"n3": {ID: "n3", Addr: "http://n3:8081"},
+		"n4": {ID: "n4", Addr: "http://n4:8081"},
+		"n5": {ID: "n5", Addr: "http://n5:8081"},
+	}
+
+	initialMembers := []NodeInfo{
+		{ID: "n1", Addr: "http://n1:8081"},
+		{ID: "n2", Addr: "http://n2:8081"},
+		{ID: "n3", Addr: "http://n3:8081"},
+		{ID: "n4", Addr: "http://n4:8081"},
+	}
+
+	routes := make(map[string]RoutingEntry, enforcedShardsPerDay)
+	for shardID, replicas := range generateRouting(initialMembers, enforcedShardsPerDay, 3) {
+		routes[routingMapKey(indexName, day, shardID)] = RoutingEntry{
+			IndexName: indexName,
+			Day:       day,
+			ShardID:   shardID,
+			Replicas:  replicas,
+			Version:   1,
+			UpdatedAt: "2026-03-21T00:00:00Z",
+		}
+	}
+
+	updates := buildRoutingRebalanceUpdates(members, routes)
+	if len(updates) < 2 {
+		t.Skipf("need at least 2 updates to verify ordering, got %d", len(updates))
+	}
+
+	for i := 1; i < len(updates); i++ {
+		if updates[i].Version <= updates[i-1].Version {
+			t.Fatalf("versions not monotonically increasing: update[%d].Version=%d <= update[%d].Version=%d",
+				i, updates[i].Version, i-1, updates[i-1].Version)
+		}
 	}
 }
 

@@ -73,6 +73,7 @@ func (s *Server) Close() {
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/", s.handleHome)
+	mux.HandleFunc("/cluster", s.handleCluster)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/admin/bootstrap", s.handleBootstrap)
 	mux.HandleFunc("/admin/indexes", s.handleAvailableIndexes)

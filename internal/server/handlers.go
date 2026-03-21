@@ -29,6 +29,19 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, webui.HomePageHTML)
 }
 
+func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/cluster" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = io.WriteString(w, webui.ClusterPageHTML)
+}
+
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

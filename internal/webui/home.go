@@ -163,7 +163,7 @@ const HomePageHTML = `<!DOCTYPE html>
       align-items: center;
     }
 
-    button {
+    button, .actions a {
       border: 0;
       border-radius: 999px;
       background: linear-gradient(135deg, var(--accent) 0%, #5cc6dc 100%);
@@ -174,11 +174,19 @@ const HomePageHTML = `<!DOCTYPE html>
       cursor: pointer;
       transition: transform 160ms ease, box-shadow 160ms ease, filter 160ms ease;
       box-shadow: 0 14px 30px rgba(92, 198, 220, 0.22);
+      text-decoration: none;
     }
 
-    button:hover {
+    button:hover, .actions a:hover {
       transform: translateY(-1px);
       filter: brightness(1.04);
+    }
+
+    button.secondary, .actions a {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid rgba(127, 231, 193, 0.25);
+      box-shadow: none;
     }
 
     button.secondary {
@@ -373,6 +381,7 @@ const HomePageHTML = `<!DOCTYPE html>
         <div class="actions">
           <button type="submit">Search cluster</button>
           <button type="button" class="secondary" id="reset-btn">Reset</button>
+          <a href="/cluster">Cluster dashboard</a>
           <div class="hint">The UI calls <code>/search</code>. Leave query empty to list all documents for the selected day or range.</div>
         </div>
         <div id="index-catalog" class="hint">Loading available indexes...</div>

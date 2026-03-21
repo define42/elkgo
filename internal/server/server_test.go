@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -141,6 +142,83 @@ func TestHandleBulkIngest_NDJSONIndexesDocuments(t *testing.T) {
 	}
 	if len(searchPayload.Hits) != 2 {
 		t.Fatalf("expected 2 search hits, got %d", len(searchPayload.Hits))
+	}
+}
+
+func TestHandleBulkIngest_BatchesReplicaWritesByShard(t *testing.T) {
+	s, ts := newTestHTTPServer(t)
+
+	day := "2026-03-21"
+	shardID := 7
+	docID1 := findDocIDForShard(t, shardID, "replica-bulk-a")
+	docID2 := findDocIDForShard(t, shardID, "replica-bulk-b")
+
+	replicaCalls := 0
+	replicaItems := 0
+	replicaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/index_batch" {
+			t.Fatalf("unexpected replica path: %s", r.URL.Path)
+		}
+		var req internalIndexBatchRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode replica batch request: %v", err)
+		}
+		if req.Replicate {
+			t.Fatalf("expected replica batch request to skip further replication")
+		}
+		if req.ShardID != shardID {
+			t.Fatalf("expected shard %d, got %d", shardID, req.ShardID)
+		}
+		replicaCalls++
+		replicaItems += len(req.Items)
+		writeJSON(w, http.StatusOK, internalIndexBatchResponse{
+			OK:      true,
+			Index:   req.IndexName,
+			Day:     req.Day,
+			Shard:   req.ShardID,
+			Indexed: len(req.Items),
+		})
+	}))
+	defer replicaServer.Close()
+
+	s.membersMu.Lock()
+	s.members["n2"] = NodeInfo{ID: "n2", Addr: replicaServer.URL}
+	s.membersMu.Unlock()
+
+	setTestRoute(s, "events", day, shardID, []string{"n1", "n2"})
+
+	body := strings.Join([]string{
+		fmt.Sprintf(`{"id":"%s","timestamp":"2026-03-21T09:00:00Z","title":"Bulk A","message":"first replica batch event"}`, docID1),
+		fmt.Sprintf(`{"id":"%s","timestamp":"2026-03-21T09:05:00Z","title":"Bulk B","message":"second replica batch event"}`, docID2),
+	}, "\n") + "\n"
+
+	resp, err := http.Post(ts.URL+"/bulk?index=events", "application/x-ndjson", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("bulk request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	var bulkPayload struct {
+		OK      bool     `json:"ok"`
+		Indexed int      `json:"indexed"`
+		Failed  int      `json:"failed"`
+		Errors  []string `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&bulkPayload); err != nil {
+		t.Fatalf("decode bulk response: %v", err)
+	}
+	if !bulkPayload.OK || bulkPayload.Indexed != 2 || bulkPayload.Failed != 0 {
+		t.Fatalf("unexpected bulk payload: %#v", bulkPayload)
+	}
+	if replicaCalls != 1 {
+		t.Fatalf("expected one replica batch request, got %d", replicaCalls)
+	}
+	if replicaItems != 2 {
+		t.Fatalf("expected replica batch to contain 2 items, got %d", replicaItems)
 	}
 }
 
@@ -329,4 +407,18 @@ func indexTestDocument(t *testing.T, s *Server, indexName, day string, shardID i
 	if err := idx.Index(docID, doc); err != nil {
 		t.Fatalf("index document: %v", err)
 	}
+}
+
+func findDocIDForShard(t *testing.T, shardID int, prefix string) string {
+	t.Helper()
+
+	for i := 0; i < 100000; i++ {
+		candidate := fmt.Sprintf("%s-%d", prefix, i)
+		if keyToShard(candidate, enforcedShardsPerDay) == shardID {
+			return candidate
+		}
+	}
+
+	t.Fatalf("could not find doc id for shard %d", shardID)
+	return ""
 }

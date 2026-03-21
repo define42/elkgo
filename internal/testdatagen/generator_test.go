@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -43,7 +45,7 @@ func TestPostDocumentsInBatches_SplitsLargeBulkRequests(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	indexed, err := g.postDocumentsInBatches(context.Background(), ts.URL+"/bulk?index=events", docs, 1000)
+	indexed, err := g.postDocumentsInBatches(context.Background(), ts.URL+"/bulk?index=events", "2026-03-21", docs, 1000)
 	if err != nil {
 		t.Fatalf("postDocumentsInBatches returned error: %v", err)
 	}
@@ -55,6 +57,59 @@ func TestPostDocumentsInBatches_SplitsLargeBulkRequests(t *testing.T) {
 	}
 	if !reflect.DeepEqual(lineCounts, []int{1000, 1000, 505}) {
 		t.Fatalf("unexpected batch sizes: %#v", lineCounts)
+	}
+}
+
+func TestPostDocumentsInBatches_LogsProgressPerThousand(t *testing.T) {
+	g := New(Config{})
+
+	docs := make([]Document, 0, 2005)
+	for i := 0; i < 2005; i++ {
+		docs = append(docs, Document{
+			"id":        "evt-" + strconv.Itoa(i+1),
+			"timestamp": "2026-03-21T12:00:00Z",
+		})
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		lines := bytes.Count(body, []byte{'\n'})
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"indexed": lines,
+			"failed":  0,
+			"errors":  []string{},
+		})
+	}))
+	defer ts.Close()
+
+	var logs bytes.Buffer
+	previousWriter := log.Writer()
+	previousFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(previousWriter)
+		log.SetFlags(previousFlags)
+	}()
+
+	_, err := g.postDocumentsInBatches(context.Background(), ts.URL+"/bulk?index=events", "2026-03-21", docs, 1000)
+	if err != nil {
+		t.Fatalf("postDocumentsInBatches returned error: %v", err)
+	}
+
+	output := logs.String()
+	for _, want := range []string{
+		"indexed=1000/2005",
+		"indexed=2000/2005",
+		"indexed=2005/2005",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected logs to contain %q, got %q", want, output)
+		}
 	}
 }
 

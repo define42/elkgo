@@ -62,6 +62,32 @@ type internalIndexRequest struct {
 	Doc       Document `json:"doc"`
 }
 
+type internalIndexBatchItem struct {
+	DocID string   `json:"doc_id"`
+	Doc   Document `json:"doc"`
+}
+
+type internalIndexBatchRequest struct {
+	IndexName string                   `json:"index_name"`
+	Day       string                   `json:"day"`
+	ShardID   int                      `json:"shard_id"`
+	Items     []internalIndexBatchItem `json:"items"`
+	Replicate bool                     `json:"replicate"`
+}
+
+type internalIndexBatchResponse struct {
+	OK       bool     `json:"ok"`
+	Index    string   `json:"index"`
+	Day      string   `json:"day"`
+	Shard    int      `json:"shard"`
+	Primary  string   `json:"primary,omitempty"`
+	Replicas []string `json:"replicas,omitempty"`
+	Indexed  int      `json:"indexed"`
+	Acks     int      `json:"acks,omitempty"`
+	Quorum   int      `json:"quorum,omitempty"`
+	Errors   []string `json:"errors,omitempty"`
+}
+
 type DumpDocsResponse struct {
 	Docs []Document `json:"docs"`
 }

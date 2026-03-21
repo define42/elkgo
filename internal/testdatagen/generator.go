@@ -110,7 +110,8 @@ func (g *Generator) Run(ctx context.Context) error {
 			return fmt.Errorf("bootstrap test data routing failed for day %s: %w", day, err)
 		}
 
-		indexed, err := g.postDocumentsInBatches(ctx, g.cfg.ServerURL+"/bulk?index="+url.QueryEscape(g.cfg.IndexName), testDataDocuments(day), g.cfg.BulkBatchSize)
+		log.Printf("test data ingest start index=%s day=%s target=%d batch_size=%d", g.cfg.IndexName, day, DefaultEventsPerDay, g.cfg.BulkBatchSize)
+		indexed, err := g.postDocumentsInBatches(ctx, g.cfg.ServerURL+"/bulk?index="+url.QueryEscape(g.cfg.IndexName), day, testDataDocuments(day), g.cfg.BulkBatchSize)
 		if err != nil {
 			return fmt.Errorf("seed test bulk ingest failed for day %s: %w", day, err)
 		}
@@ -221,7 +222,7 @@ func (g *Generator) bootstrapDay(ctx context.Context, day string) error {
 	return nil
 }
 
-func (g *Generator) postDocumentsInBatches(ctx context.Context, ingestURL string, docs []Document, batchSize int) (int, error) {
+func (g *Generator) postDocumentsInBatches(ctx context.Context, ingestURL, day string, docs []Document, batchSize int) (int, error) {
 	if len(docs) == 0 {
 		return 0, nil
 	}
@@ -249,6 +250,16 @@ func (g *Generator) postDocumentsInBatches(ctx context.Context, ingestURL string
 			return indexed, fmt.Errorf("batch %d-%d partially failed: indexed=%d failed=%d errors=%v", start, end-1, resp.Indexed, resp.Failed, resp.Errors)
 		}
 		indexed += resp.Indexed
+		log.Printf(
+			"test data ingest progress index=%s day=%s batch=%d-%d indexed=%d/%d remaining=%d",
+			g.cfg.IndexName,
+			day,
+			start+1,
+			end,
+			indexed,
+			len(docs),
+			len(docs)-indexed,
+		)
 	}
 
 	return indexed, nil

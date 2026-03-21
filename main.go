@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/blevesearch/bleve/v2"
+	blevemapping "github.com/blevesearch/bleve/v2/mapping"
 	"github.com/blevesearch/bleve/v2/search/query"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
@@ -258,7 +259,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func (s *nodeServer) connectEtcd(ctx context.Context) error {
+func (s *nodeServer) connectEtcd(_ context.Context) error {
 	cli, err := clientv3.New(clientv3.Config{Endpoints: s.etcdEndpoints, DialTimeout: 5 * time.Second})
 	if err != nil {
 		return err
@@ -287,7 +288,10 @@ func (s *nodeServer) registerMember(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	go func() { for range ch { } }()
+	go func() {
+		for range ch {
+		}
+	}()
 	return nil
 }
 
@@ -586,7 +590,10 @@ func (s *nodeServer) handleSearch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "routing not initialized for requested index/day range", http.StatusServiceUnavailable)
 		return
 	}
-	type result struct { Hits []ShardHit; Err error }
+	type result struct {
+		Hits []ShardHit
+		Err  error
+	}
 	ch := make(chan result, len(targets))
 	for _, target := range targets {
 		go func(target RoutingEntry) {
@@ -761,7 +768,7 @@ func (s *nodeServer) openShardIndex(indexName, day string, shardID int) (bleve.I
 	return idx, nil
 }
 
-func buildIndexMapping() bleve.IndexMapping {
+func buildIndexMapping() blevemapping.IndexMapping {
 	indexMapping := bleve.NewIndexMapping()
 	indexMapping.DefaultAnalyzer = "standard"
 	docMapping := bleve.NewDocumentMapping()
@@ -812,10 +819,18 @@ func normalizeGenericDocument(doc Document) (string, string, error) {
 		return "", "", errors.New("document must contain a non-empty string field: id")
 	}
 	doc["id"] = id
-	if title, ok := doc["title"]; ok { doc["title"] = fmt.Sprint(title) }
-	if body, ok := doc["body"]; ok { doc["body"] = fmt.Sprint(body) }
-	if msg, ok := doc["message"]; ok { doc["message"] = fmt.Sprint(msg) }
-	if tags, ok := doc["tags"]; ok { doc["tags"] = normalizeStringArray(tags) }
+	if title, ok := doc["title"]; ok {
+		doc["title"] = fmt.Sprint(title)
+	}
+	if body, ok := doc["body"]; ok {
+		doc["body"] = fmt.Sprint(body)
+	}
+	if msg, ok := doc["message"]; ok {
+		doc["message"] = fmt.Sprint(msg)
+	}
+	if tags, ok := doc["tags"]; ok {
+		doc["tags"] = normalizeStringArray(tags)
+	}
 	day, err := extractEventDay(doc)
 	if err != nil {
 		return "", "", err
@@ -1084,7 +1099,7 @@ func keyToShard(key string, numShards int) int {
 func generateRouting(nodes []NodeInfo, numShards int, rf int) map[int][]string {
 	out := make(map[int][]string, numShards)
 	for shardID := 0; shardID < numShards; shardID++ {
-		type scored struct { id, score string }
+		type scored struct{ id, score string }
 		var scoredNodes []scored
 		for _, n := range nodes {
 			h := sha1.Sum([]byte(fmt.Sprintf("%d:%s", shardID, n.ID)))
@@ -1128,10 +1143,16 @@ func resolveSearchDays(r *http.Request) ([]string, error) {
 		return nil, errors.New("provide either day or both day_from and day_to")
 	}
 	start, err := time.Parse("2006-01-02", from)
-	if err != nil { return nil, errors.New("invalid day_from") }
+	if err != nil {
+		return nil, errors.New("invalid day_from")
+	}
 	end, err := time.Parse("2006-01-02", to)
-	if err != nil { return nil, errors.New("invalid day_to") }
-	if end.Before(start) { return nil, errors.New("day_to must be >= day_from") }
+	if err != nil {
+		return nil, errors.New("invalid day_to")
+	}
+	if end.Before(start) {
+		return nil, errors.New("day_to must be >= day_from")
+	}
 	var days []string
 	for d := start; !d.After(end); d = d.Add(24 * time.Hour) {
 		days = append(days, d.Format("2006-01-02"))
@@ -1141,17 +1162,24 @@ func resolveSearchDays(r *http.Request) ([]string, error) {
 
 func collectTargets(routes map[string]RoutingEntry, indexName string, days []string) []RoutingEntry {
 	daySet := map[string]struct{}{}
-	for _, d := range days { daySet[d] = struct{}{} }
+	for _, d := range days {
+		daySet[d] = struct{}{}
+	}
 	out := make([]RoutingEntry, 0)
 	for _, rt := range routes {
-		if rt.IndexName != indexName { continue }
-		if _, ok := daySet[rt.Day]; !ok { continue }
+		if rt.IndexName != indexName {
+			continue
+		}
+		if _, ok := daySet[rt.Day]; !ok {
+			continue
+		}
 		out = append(out, rt)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Day == out[j].Day { return out[i].ShardID < out[j].ShardID }
+		if out[i].Day == out[j].Day {
+			return out[i].ShardID < out[j].ShardID
+		}
 		return out[i].Day < out[j].Day
 	})
 	return out
 }
-

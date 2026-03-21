@@ -1,0 +1,88 @@
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.6.9
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd
+      - --data-dir=/etcd-data
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-cluster=etcd=http://etcd:2380
+      - --initial-cluster-state=new
+    volumes:
+      - etcd-data:/etcd-data
+    ports:
+      - "2379:2379"
+
+  elkgo1:
+    build:
+      context: .
+    depends_on:
+      - etcd
+    command:
+      - -mode=both
+      - -node-id=n1
+      - -listen=:8081
+      - -data=/app/data
+      - -etcd-endpoints=http://etcd:2379
+    volumes:
+      - elkgo1-data:/app/data
+    ports:
+      - "8081:8081"
+
+  elkgo2:
+    build:
+      context: .
+    depends_on:
+      - etcd
+    command:
+      - -mode=both
+      - -node-id=n2
+      - -listen=:8081
+      - -data=/app/data
+      - -etcd-endpoints=http://etcd:2379
+    volumes:
+      - elkgo2-data:/app/data
+    ports:
+      - "8082:8081"
+
+  elkgo3:
+    build:
+      context: .
+    depends_on:
+      - etcd
+    command:
+      - -mode=both
+      - -node-id=n3
+      - -listen=:8081
+      - -data=/app/data
+      - -etcd-endpoints=http://etcd:2379
+    volumes:
+      - elkgo3-data:/app/data
+    ports:
+      - "8083:8081"
+
+  elkgo4:
+    build:
+      context: .
+    depends_on:
+      - etcd
+    command:
+      - -mode=both
+      - -node-id=n4
+      - -listen=:8081
+      - -data=/app/data
+      - -etcd-endpoints=http://etcd:2379
+    volumes:
+      - elkgo4-data:/app/data
+    ports:
+      - "8084:8081"
+
+volumes:
+  etcd-data:
+  elkgo1-data:
+  elkgo2-data:
+  elkgo3-data:
+  elkgo4-data:

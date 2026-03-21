@@ -127,6 +127,9 @@ type Server struct {
 	mu      sync.RWMutex
 	indexes map[string]bleve.Index
 
+	replicaCacheMu sync.RWMutex
+	replicaCache   map[string]string
+
 	etcd              *clientv3.Client
 	etcdEndpoints     []string
 	memberLeaseID     clientv3.LeaseID

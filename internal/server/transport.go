@@ -37,6 +37,47 @@ func (s *Server) postJSON(ctx context.Context, url string, body any, out any) er
 	return nil
 }
 
+func (s *Server) postJSONStatus(ctx context.Context, url string, body any, out any) (int, error) {
+	buf := new(bytes.Buffer)
+	if err := json.NewEncoder(buf).Encode(body); err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, buf)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, err
+	}
+	bodyText := strings.TrimSpace(string(bodyBytes))
+
+	if out != nil && len(bodyBytes) > 0 {
+		if err := json.Unmarshal(bodyBytes, out); err != nil {
+			if resp.StatusCode/100 != 2 {
+				return resp.StatusCode, fmt.Errorf("status %d: %s", resp.StatusCode, bodyText)
+			}
+			return resp.StatusCode, err
+		}
+	}
+
+	if resp.StatusCode/100 != 2 {
+		if out != nil && len(bodyBytes) > 0 {
+			return resp.StatusCode, nil
+		}
+		return resp.StatusCode, fmt.Errorf("status %d: %s", resp.StatusCode, bodyText)
+	}
+
+	return resp.StatusCode, nil
+}
+
 func (s *Server) postNDJSON(ctx context.Context, url string, docs []Document, out any) error {
 	return postNDJSONWithClient(ctx, s.client, url, docs, out)
 }

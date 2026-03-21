@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -173,15 +174,6 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, out)
 }
 
-func (s *Server) handlePrimaryIndex(w http.ResponseWriter, r *http.Request, indexName, day string, shardID int, route RoutingEntry, docID string, doc Document) {
-	status, out, err := s.indexOnPrimary(r.Context(), indexName, day, shardID, route, docID, doc)
-	if err != nil {
-		http.Error(w, err.Error(), status)
-		return
-	}
-	writeJSON(w, status, out)
-}
-
 func (s *Server) handleInternalIndex(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -205,12 +197,10 @@ func (s *Server) handleInternalIndex(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	idx, err := s.openShardIndex(req.IndexName, req.Day, req.ShardID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := idx.Index(docID, req.Doc); err != nil {
+	if err := s.indexBatchLocal(req.IndexName, req.Day, req.ShardID, []internalIndexBatchItem{{
+		DocID: docID,
+		Doc:   req.Doc,
+	}}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -290,25 +280,44 @@ func (s *Server) routingStatsMap(ctx context.Context, routes map[string]RoutingE
 
 func (s *Server) routingEntryStats(ctx context.Context, route RoutingEntry) RoutingEntryStats {
 	out := RoutingEntryStats{RoutingEntry: route}
-	replicaNodeID, err := s.pickHealthyReplica(ctx, route.IndexName, route.Day, route.ShardID)
-	if err != nil {
-		out.CountError = err.Error()
-		return out
-	}
-	addr, ok := s.memberAddr(replicaNodeID)
-	if !ok {
-		out.CountError = "replica " + replicaNodeID + " has no address"
-		return out
-	}
-
-	var resp ShardStatsResponse
-	err = s.getJSON(ctx, addr+"/internal/shard_stats?index="+route.IndexName+"&day="+route.Day+"&shard="+strconv.Itoa(route.ShardID), &resp)
+	resp, err := s.fetchShardStats(ctx, route)
 	if err != nil {
 		out.CountError = err.Error()
 		return out
 	}
 	out.EventCount = resp.EventCount
 	return out
+}
+
+func (s *Server) fetchShardStats(ctx context.Context, route RoutingEntry) (ShardStatsResponse, error) {
+	tried := make(map[string]struct{}, len(route.Replicas))
+	errorsOut := make([]string, 0, len(route.Replicas))
+	routeKey := routingMapKey(route.IndexName, route.Day, route.ShardID)
+
+	for attempt := 0; attempt < len(route.Replicas); attempt++ {
+		replicaNodeID, addr, err := s.pickReplicaForRoute(ctx, route, tried)
+		if err != nil {
+			if len(errorsOut) == 0 {
+				return ShardStatsResponse{}, err
+			}
+			break
+		}
+		tried[replicaNodeID] = struct{}{}
+
+		var resp ShardStatsResponse
+		err = s.getJSON(ctx, addr+"/internal/shard_stats?index="+route.IndexName+"&day="+route.Day+"&shard="+strconv.Itoa(route.ShardID), &resp)
+		if err == nil {
+			return resp, nil
+		}
+
+		s.invalidateReplica(routeKey, replicaNodeID)
+		errorsOut = append(errorsOut, replicaNodeID+": "+err.Error())
+	}
+
+	if len(errorsOut) == 0 {
+		return ShardStatsResponse{}, fmt.Errorf("stats %s/%s shard %d failed", route.IndexName, route.Day, route.ShardID)
+	}
+	return ShardStatsResponse{}, fmt.Errorf("stats %s/%s shard %d failed: %s", route.IndexName, route.Day, route.ShardID, strings.Join(errorsOut, "; "))
 }
 
 func queryEnabled(r *http.Request, key string) bool {

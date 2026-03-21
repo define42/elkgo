@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,19 +46,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	ch := make(chan result, len(targets))
 	for _, target := range targets {
 		go func(target RoutingEntry) {
-			replicaNodeID, err := s.pickHealthyReplica(r.Context(), target.IndexName, target.Day, target.ShardID)
-			if err != nil {
-				ch <- result{Err: err}
-				return
-			}
-			addr, ok := s.memberAddr(replicaNodeID)
-			if !ok {
-				ch <- result{Err: fmt.Errorf("replica %s has no address", replicaNodeID)}
-				return
-			}
-			var resp SearchShardResponse
-			err = s.postJSON(r.Context(), addr+"/internal/search_shard", SearchShardRequest{IndexName: target.IndexName, Day: target.Day, ShardID: target.ShardID, Query: q, K: k * 2}, &resp)
-			ch <- result{Hits: resp.Hits, Err: err}
+			hits, err := s.searchShard(r.Context(), target, q, k)
+			ch <- result{Hits: hits, Err: err}
 		}(target)
 	}
 	allHits := make([]ShardHit, 0, len(targets)*k)
@@ -80,6 +70,43 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		allHits = allHits[:k]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"index": indexName, "days": days, "query": q, "k": k, "hits": allHits, "partial_errors": partial, "shards_per_day": enforcedShardsPerDay})
+}
+
+func (s *Server) searchShard(ctx context.Context, target RoutingEntry, q string, k int) ([]ShardHit, error) {
+	tried := make(map[string]struct{}, len(target.Replicas))
+	errorsOut := make([]string, 0, len(target.Replicas))
+	routeKey := routingMapKey(target.IndexName, target.Day, target.ShardID)
+
+	for attempt := 0; attempt < len(target.Replicas); attempt++ {
+		replicaNodeID, addr, err := s.pickReplicaForRoute(ctx, target, tried)
+		if err != nil {
+			if len(errorsOut) == 0 {
+				return nil, err
+			}
+			break
+		}
+		tried[replicaNodeID] = struct{}{}
+
+		var resp SearchShardResponse
+		err = s.postJSON(ctx, addr+"/internal/search_shard", SearchShardRequest{
+			IndexName: target.IndexName,
+			Day:       target.Day,
+			ShardID:   target.ShardID,
+			Query:     q,
+			K:         k * 2,
+		}, &resp)
+		if err == nil {
+			return resp.Hits, nil
+		}
+
+		s.invalidateReplica(routeKey, replicaNodeID)
+		errorsOut = append(errorsOut, replicaNodeID+": "+err.Error())
+	}
+
+	if len(errorsOut) == 0 {
+		return nil, fmt.Errorf("search shard %s/%s shard %d failed", target.IndexName, target.Day, target.ShardID)
+	}
+	return nil, fmt.Errorf("search shard %s/%s shard %d failed: %s", target.IndexName, target.Day, target.ShardID, strings.Join(errorsOut, "; "))
 }
 
 func (s *Server) handleSearchShard(w http.ResponseWriter, r *http.Request) {

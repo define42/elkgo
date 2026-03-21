@@ -5,5 +5,6 @@ all:
 	docker compose up
 
 test:
-	./...
-	go test -tags=integration ./internal/server
+	go test -tags=integration ./... -cover
+#	go test ./...
+#	go test -tags=integration ./internal/server

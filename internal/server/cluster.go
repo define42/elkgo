@@ -66,6 +66,7 @@ func (s *Server) loadMembers(ctx context.Context) error {
 	s.membersMu.Lock()
 	s.members = members
 	s.membersMu.Unlock()
+	s.clearReplicaCache()
 	return nil
 }
 
@@ -96,6 +97,7 @@ func (s *Server) loadRouting(ctx context.Context) error {
 	s.routingMu.Lock()
 	s.routing = routing
 	s.routingMu.Unlock()
+	s.clearReplicaCache()
 	return nil
 }
 

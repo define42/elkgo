@@ -18,6 +18,7 @@ func New(cfg Config) *Server {
 		mode:              cfg.Mode,
 		client:            &http.Client{Timeout: 8 * time.Second},
 		indexes:           map[string]bleve.Index{},
+		replicaCache:      map[string]string{},
 		etcdEndpoints:     append([]string(nil), cfg.ETCDEndpoints...),
 		routing:           map[string]RoutingEntry{},
 		members:           map[string]NodeInfo{},
@@ -44,7 +45,6 @@ func (s *Server) Run() error {
 
 	go s.watchMembers(context.Background())
 	go s.watchRouting(context.Background())
-	go s.repairLoop(context.Background())
 
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)

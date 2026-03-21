@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash/fnv"
-	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -67,6 +66,37 @@ func (s *Server) memberAddr(nodeID string) (string, bool) {
 	return m.Addr, ok
 }
 
+func (s *Server) clearReplicaCache() {
+	s.replicaCacheMu.Lock()
+	defer s.replicaCacheMu.Unlock()
+	clear(s.replicaCache)
+}
+
+func (s *Server) cachedReplica(routeKey string) (string, bool) {
+	s.replicaCacheMu.RLock()
+	defer s.replicaCacheMu.RUnlock()
+	nodeID, ok := s.replicaCache[routeKey]
+	return nodeID, ok
+}
+
+func (s *Server) cacheReplica(routeKey, nodeID string) {
+	s.replicaCacheMu.Lock()
+	defer s.replicaCacheMu.Unlock()
+	s.replicaCache[routeKey] = nodeID
+}
+
+func (s *Server) invalidateReplica(routeKey, nodeID string) {
+	s.replicaCacheMu.Lock()
+	defer s.replicaCacheMu.Unlock()
+	cached, ok := s.replicaCache[routeKey]
+	if !ok {
+		return
+	}
+	if nodeID == "" || cached == nodeID {
+		delete(s.replicaCache, routeKey)
+	}
+}
+
 func (s *Server) ownsReplica(indexName, day string, shardID int) bool {
 	rt, ok := s.getRouting(indexName, day, shardID)
 	if !ok {
@@ -80,27 +110,40 @@ func (s *Server) ownsReplica(indexName, day string, shardID int) bool {
 	return false
 }
 
-func (s *Server) pickHealthyReplica(ctx context.Context, indexName, day string, shardID int) (string, error) {
-	rt, ok := s.getRouting(indexName, day, shardID)
-	if !ok {
-		return "", fmt.Errorf("no routing for %s/%s shard %d", indexName, day, shardID)
+func (s *Server) pickReplicaForRoute(_ context.Context, route RoutingEntry, exclude map[string]struct{}) (string, string, error) {
+	routeKey := routingMapKey(route.IndexName, route.Day, route.ShardID)
+	if cachedNodeID, ok := s.cachedReplica(routeKey); ok {
+		if _, skipped := exclude[cachedNodeID]; !skipped && routeHasReplica(route, cachedNodeID) {
+			if addr, ok := s.memberAddr(cachedNodeID); ok {
+				return cachedNodeID, addr, nil
+			}
+		}
+		s.invalidateReplica(routeKey, cachedNodeID)
 	}
-	for _, nodeID := range rt.Replicas {
+
+	for _, nodeID := range route.Replicas {
+		if _, skipped := exclude[nodeID]; skipped {
+			continue
+		}
 		addr, ok := s.memberAddr(nodeID)
 		if !ok {
 			continue
 		}
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, addr+"/healthz", nil)
-		resp, err := s.client.Do(req)
-		if err == nil && resp.StatusCode == http.StatusOK {
-			resp.Body.Close()
-			return nodeID, nil
-		}
-		if resp != nil {
-			resp.Body.Close()
+		s.cacheReplica(routeKey, nodeID)
+		return nodeID, addr, nil
+	}
+
+	s.invalidateReplica(routeKey, "")
+	return "", "", fmt.Errorf("no available replica for %s/%s shard %d", route.IndexName, route.Day, route.ShardID)
+}
+
+func routeHasReplica(route RoutingEntry, nodeID string) bool {
+	for _, replica := range route.Replicas {
+		if replica == nodeID {
+			return true
 		}
 	}
-	return "", fmt.Errorf("no healthy replica for %s/%s shard %d", indexName, day, shardID)
+	return false
 }
 
 func keyToShard(key string, numShards int) int {

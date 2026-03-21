@@ -222,6 +222,180 @@ func TestHandleBulkIngest_BatchesReplicaWritesByShard(t *testing.T) {
 	}
 }
 
+func TestHandleIndex_RemotePrimaryUsesBatchReplication(t *testing.T) {
+	s, ts := newTestHTTPServer(t)
+
+	day := "2026-03-21"
+	shardID := 5
+	docID := findDocIDForShard(t, shardID, "remote-primary")
+
+	primaryBatchCalls := 0
+	primaryIndexCalls := 0
+	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/internal/index_batch":
+			primaryBatchCalls++
+
+			var req internalIndexBatchRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode primary batch request: %v", err)
+			}
+			if !req.Replicate {
+				t.Fatalf("expected primary batch request to replicate")
+			}
+			if req.IndexName != "events" || req.Day != day || req.ShardID != shardID {
+				t.Fatalf("unexpected primary batch request: %#v", req)
+			}
+			if len(req.Items) != 1 || req.Items[0].DocID != docID {
+				t.Fatalf("unexpected primary batch items: %#v", req.Items)
+			}
+
+			writeJSON(w, http.StatusOK, internalIndexBatchResponse{
+				OK:       true,
+				Index:    req.IndexName,
+				Day:      req.Day,
+				Shard:    req.ShardID,
+				Primary:  "n2",
+				Replicas: []string{"n2", "n1"},
+				Indexed:  1,
+				Acks:     2,
+				Quorum:   2,
+			})
+		case "/internal/index":
+			primaryIndexCalls++
+			t.Fatalf("unexpected single-document primary path hit")
+		default:
+			t.Fatalf("unexpected primary path: %s", r.URL.Path)
+		}
+	}))
+	defer primaryServer.Close()
+
+	s.membersMu.Lock()
+	s.members["n2"] = NodeInfo{ID: "n2", Addr: primaryServer.URL}
+	s.membersMu.Unlock()
+
+	setTestRoute(s, "events", day, shardID, []string{"n2", "n1"})
+
+	body := fmt.Sprintf(`{"id":"%s","timestamp":"%sT09:00:00Z","message":"remote primary event"}`, docID, day)
+	resp, err := http.Post(ts.URL+"/index?index=events", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("index request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode index response: %v", err)
+	}
+	if payload["doc_id"] != docID {
+		t.Fatalf("expected doc_id %q, got %#v", docID, payload["doc_id"])
+	}
+	if primaryBatchCalls != 1 {
+		t.Fatalf("expected one batch call to primary, got %d", primaryBatchCalls)
+	}
+	if primaryIndexCalls != 0 {
+		t.Fatalf("expected zero single-doc primary calls, got %d", primaryIndexCalls)
+	}
+}
+
+func TestHandleSearch_CachesReplicaAfterFailover(t *testing.T) {
+	s, ts := newTestHTTPServer(t)
+
+	day := "2026-03-21"
+	shardID := 0
+
+	n2SearchCalls := 0
+	n2HealthCalls := 0
+	replica1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/internal/search_shard":
+			n2SearchCalls++
+			http.Error(w, "search shard unavailable", http.StatusServiceUnavailable)
+		case "/healthz":
+			n2HealthCalls++
+			http.Error(w, "unexpected health probe", http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected replica1 path: %s", r.URL.Path)
+		}
+	}))
+	defer replica1.Close()
+
+	n3SearchCalls := 0
+	n3HealthCalls := 0
+	replica2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/internal/search_shard":
+			n3SearchCalls++
+			writeJSON(w, http.StatusOK, SearchShardResponse{
+				Hits: []ShardHit{{
+					Index:  "events",
+					Day:    day,
+					Shard:  shardID,
+					Score:  1,
+					DocID:  "cached-hit",
+					Source: Document{"id": "cached-hit", "message": "cached replica result"},
+				}},
+			})
+		case "/healthz":
+			n3HealthCalls++
+			http.Error(w, "unexpected health probe", http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected replica2 path: %s", r.URL.Path)
+		}
+	}))
+	defer replica2.Close()
+
+	s.membersMu.Lock()
+	s.members["n2"] = NodeInfo{ID: "n2", Addr: replica1.URL}
+	s.members["n3"] = NodeInfo{ID: "n3", Addr: replica2.URL}
+	s.membersMu.Unlock()
+
+	setTestRoute(s, "events", day, shardID, []string{"n2", "n3"})
+
+	searchURL := ts.URL + "/search?index=events&day=" + url.QueryEscape(day) + "&q=" + url.QueryEscape("cached") + "&k=10"
+	for i := 0; i < 2; i++ {
+		resp, err := http.Get(searchURL)
+		if err != nil {
+			t.Fatalf("search request %d failed: %v", i+1, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			t.Fatalf("expected search status 200, got %d", resp.StatusCode)
+		}
+
+		var payload struct {
+			Hits          []ShardHit `json:"hits"`
+			PartialErrors []string   `json:"partial_errors"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			resp.Body.Close()
+			t.Fatalf("decode search response %d: %v", i+1, err)
+		}
+		resp.Body.Close()
+
+		if len(payload.Hits) != 1 || payload.Hits[0].DocID != "cached-hit" {
+			t.Fatalf("unexpected search hits on request %d: %#v", i+1, payload.Hits)
+		}
+		if len(payload.PartialErrors) != 0 {
+			t.Fatalf("expected no partial errors on request %d, got %#v", i+1, payload.PartialErrors)
+		}
+	}
+
+	if n2SearchCalls != 1 {
+		t.Fatalf("expected failing replica to be tried once, got %d", n2SearchCalls)
+	}
+	if n3SearchCalls != 2 {
+		t.Fatalf("expected healthy replica to serve both searches, got %d", n3SearchCalls)
+	}
+	if n2HealthCalls != 0 || n3HealthCalls != 0 {
+		t.Fatalf("expected zero health probes, got n2=%d n3=%d", n2HealthCalls, n3HealthCalls)
+	}
+}
+
 func TestHandleSearch_GenericNumericAndDateFields(t *testing.T) {
 	s, ts := newTestHTTPServer(t)
 

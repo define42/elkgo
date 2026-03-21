@@ -230,25 +230,12 @@ func (s *Server) ingestDocument(ctx context.Context, indexName string, doc Docum
 	if len(route.Replicas) == 0 {
 		return http.StatusServiceUnavailable, nil, errors.New("no replicas for shard")
 	}
-	primary := route.Replicas[0]
-	if primary == s.nodeID {
-		return s.indexOnPrimary(ctx, indexName, day, shardID, route, docID, doc)
+
+	status, resp, err := s.indexSingleDocument(ctx, indexName, day, shardID, route, docID, doc)
+	if err != nil {
+		return status, nil, err
 	}
-	primaryAddr, ok := s.memberAddr(primary)
-	if !ok {
-		return http.StatusServiceUnavailable, nil, errors.New("primary not registered")
-	}
-	var out map[string]any
-	if err := s.postJSON(ctx, primaryAddr+"/internal/index", internalIndexRequest{
-		IndexName: indexName,
-		Day:       day,
-		ShardID:   shardID,
-		DocID:     docID,
-		Doc:       doc,
-	}, &out); err != nil {
-		return http.StatusServiceUnavailable, nil, err
-	}
-	return http.StatusOK, out, nil
+	return status, singleDocumentResponse(docID, resp), nil
 }
 
 func (s *Server) handleInternalIndexBatch(w http.ResponseWriter, r *http.Request) {
@@ -310,52 +297,61 @@ func (s *Server) handleInternalIndexBatch(w http.ResponseWriter, r *http.Request
 	})
 }
 
-func (s *Server) indexOnPrimary(ctx context.Context, indexName, day string, shardID int, route RoutingEntry, docID string, doc Document) (int, map[string]any, error) {
-	idx, err := s.openShardIndex(indexName, day, shardID)
+func (s *Server) indexSingleDocument(ctx context.Context, indexName, day string, shardID int, route RoutingEntry, docID string, doc Document) (int, internalIndexBatchResponse, error) {
+	items := []internalIndexBatchItem{{
+		DocID: docID,
+		Doc:   doc,
+	}}
+
+	primary := route.Replicas[0]
+	if primary == s.nodeID {
+		return s.indexBatchOnPrimary(ctx, indexName, day, shardID, route, items)
+	}
+
+	primaryAddr, ok := s.memberAddr(primary)
+	if !ok {
+		return http.StatusServiceUnavailable, internalIndexBatchResponse{}, errors.New("primary not registered")
+	}
+
+	var resp internalIndexBatchResponse
+	status, err := s.postJSONStatus(ctx, primaryAddr+"/internal/index_batch", internalIndexBatchRequest{
+		IndexName: indexName,
+		Day:       day,
+		ShardID:   shardID,
+		Items:     items,
+		Replicate: true,
+	}, &resp)
 	if err != nil {
-		return http.StatusInternalServerError, nil, err
-	}
-	if err := idx.Index(docID, doc); err != nil {
-		return http.StatusInternalServerError, nil, err
-	}
-	acks := 1
-	var errs []string
-	for _, replica := range route.Replicas[1:] {
-		addr, ok := s.memberAddr(replica)
-		if !ok {
-			errs = append(errs, replica+": not registered")
-			continue
+		if status == 0 {
+			status = http.StatusServiceUnavailable
 		}
-		if err := s.postJSON(ctx, addr+"/internal/index", internalIndexRequest{
-			IndexName: indexName,
-			Day:       day,
-			ShardID:   shardID,
-			DocID:     docID,
-			Doc:       doc,
-		}, nil); err != nil {
-			errs = append(errs, replica+": "+err.Error())
-			continue
-		}
-		acks++
+		return status, resp, err
 	}
+	return status, resp, nil
+}
 
-	quorum := len(route.Replicas)/2 + 1
+func singleDocumentResponse(docID string, resp internalIndexBatchResponse) map[string]any {
 	out := map[string]any{
-		"ok":       acks >= quorum,
-		"index":    indexName,
-		"day":      day,
-		"shard":    shardID,
-		"primary":  s.nodeID,
-		"replicas": route.Replicas,
-		"acks":     acks,
-		"errors":   errs,
+		"ok":     resp.OK,
+		"index":  resp.Index,
+		"day":    resp.Day,
+		"shard":  resp.Shard,
+		"doc_id": docID,
+		"errors": append([]string(nil), resp.Errors...),
 	}
-
-	if acks < quorum {
-		out["quorum"] = quorum
-		return http.StatusServiceUnavailable, out, nil
+	if resp.Primary != "" {
+		out["primary"] = resp.Primary
 	}
-	return http.StatusOK, out, nil
+	if len(resp.Replicas) > 0 {
+		out["replicas"] = append([]string(nil), resp.Replicas...)
+	}
+	if resp.Acks > 0 {
+		out["acks"] = resp.Acks
+	}
+	if resp.Quorum > 0 {
+		out["quorum"] = resp.Quorum
+	}
+	return out
 }
 
 func (s *Server) indexBatchOnPrimary(ctx context.Context, indexName, day string, shardID int, route RoutingEntry, items []internalIndexBatchItem) (int, internalIndexBatchResponse, error) {

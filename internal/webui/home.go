@@ -526,7 +526,7 @@ const HomePageHTML = `<!DOCTYPE html>
       if (availableIndexes.length === 0) {
         fields.index.disabled = true;
         fields.index.innerHTML = '<option value="">No indexes available</option>';
-        indexCatalogEl.textContent = "No searchable indexes yet. Bootstrap one or run with ELKGO_ADD_TEST_DATA=true.";
+        indexCatalogEl.textContent = "No searchable indexes yet. Bootstrap one or start the elkgo-testdata generator service.";
         return;
       }
 
@@ -610,7 +610,7 @@ const HomePageHTML = `<!DOCTYPE html>
         errorsEl.innerHTML = "";
         let message = error.message || "Search failed.";
         if (message.includes("routing not initialized")) {
-          message += " Bootstrap an index/day first, or enable ELKGO_ADD_TEST_DATA=true.";
+          message += " Bootstrap an index/day first, or run the elkgo-testdata generator service.";
         }
         setStatus(message, true);
       }

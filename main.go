@@ -40,7 +40,6 @@ func main() {
 		DataDir:           dataDir,
 		ETCDEndpoints:     endpoints,
 		ReplicationFactor: replicationFactor,
-		AddTestData:       envBool("ELKGO_ADD_TEST_DATA"),
 	})
 	defer s.Close()
 
@@ -66,13 +65,4 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-func envBool(key string) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
-	case "1", "true", "t", "yes", "y", "on":
-		return true
-	default:
-		return false
-	}
 }

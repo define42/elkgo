@@ -87,16 +87,14 @@ type Config struct {
 	DataDir           string
 	ETCDEndpoints     []string
 	ReplicationFactor int
-	AddTestData       bool
 }
 
 type Server struct {
-	nodeID      string
-	listen      string
-	publicAddr  string
-	dataDir     string
-	mode        string
-	addTestData bool
+	nodeID     string
+	listen     string
+	publicAddr string
+	dataDir    string
+	mode       string
 
 	client *http.Client
 

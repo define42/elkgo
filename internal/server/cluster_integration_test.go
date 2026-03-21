@@ -159,8 +159,7 @@ func startIntegrationCluster(t *testing.T, ctx context.Context) integrationClust
 		}
 		opts := []testcontainers.ContainerCustomizer{
 			testcontainers.WithEnv(map[string]string{
-				"ELKGO_PUBLIC_ADDR":   "http://" + alias + ":8081",
-				"ELKGO_ADD_TEST_DATA": "false",
+				"ELKGO_PUBLIC_ADDR": "http://" + alias + ":8081",
 			}),
 			testcontainers.WithExposedPorts("8081/tcp"),
 			testcontainers.WithCmd(cmd...),

@@ -16,7 +16,6 @@ func New(cfg Config) *Server {
 		publicAddr:        cfg.PublicAddr,
 		dataDir:           cfg.DataDir,
 		mode:              cfg.Mode,
-		addTestData:       cfg.AddTestData,
 		client:            &http.Client{Timeout: 8 * time.Second},
 		indexes:           map[string]bleve.Index{},
 		etcdEndpoints:     append([]string(nil), cfg.ETCDEndpoints...),
@@ -46,9 +45,6 @@ func (s *Server) Run() error {
 	go s.watchMembers(context.Background())
 	go s.watchRouting(context.Background())
 	go s.repairLoop(context.Background())
-	if s.addTestData {
-		go s.ensureTestData(context.Background())
-	}
 
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)

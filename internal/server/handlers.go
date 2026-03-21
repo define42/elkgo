@@ -121,6 +121,71 @@ func (s *Server) handleAvailableIndexes(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"indexes": indexes})
 }
 
+func (s *Server) handleNodeDrain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.isCoordinatorMode() {
+		http.Error(w, "node drain requires coordinator or both mode", http.StatusForbidden)
+		return
+	}
+
+	nodeID := strings.TrimSpace(r.URL.Query().Get("node_id"))
+	if nodeID == "" {
+		http.Error(w, "missing node_id", http.StatusBadRequest)
+		return
+	}
+
+	drainRequested, err := parseDrainFlag(r.URL.Query().Get("drain"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	members := s.snapshotMembers()
+	member, ok := members[nodeID]
+	if !ok {
+		http.Error(w, "unknown node", http.StatusNotFound)
+		return
+	}
+
+	if drainRequested {
+		state := NodeDrainState{
+			NodeID:      nodeID,
+			RequestedAt: time.Now().UTC().Format(time.RFC3339),
+		}
+		b, err := json.Marshal(state)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if _, err := s.etcd.Put(r.Context(), s.drainPrefix+nodeID, string(b)); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		if _, err := s.etcd.Delete(r.Context(), s.drainPrefix+nodeID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := s.loadMembers(context.Background()); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	go s.maybeRebalanceRouting(context.Background())
+
+	member = s.snapshotMembers()[nodeID]
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":              true,
+		"node_id":         nodeID,
+		"addr":            member.Addr,
+		"drain_requested": member.DrainRequested,
+	})
+}
+
 func (s *Server) handleRouting(w http.ResponseWriter, r *http.Request) {
 	indexName := strings.TrimSpace(r.URL.Query().Get("index"))
 	day := strings.TrimSpace(r.URL.Query().Get("day"))
@@ -219,7 +284,7 @@ func (s *Server) handleDumpDocs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing or invalid shard", http.StatusBadRequest)
 		return
 	}
-	if !s.ownsReplica(indexName, day, shardID) {
+	if !s.ownsReplica(indexName, day, shardID) && !s.localShardExists(indexName, day, shardID) {
 		http.Error(w, "replica not assigned", http.StatusForbidden)
 		return
 	}
@@ -326,5 +391,16 @@ func queryEnabled(r *http.Request, key string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func parseDrainFlag(raw string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid drain flag")
 	}
 }

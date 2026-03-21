@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"sort"
 	"strings"
 	"time"
 
@@ -55,13 +54,31 @@ func (s *Server) loadMembers(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	drainResp, err := s.etcd.Get(ctx, s.drainPrefix, clientv3.WithPrefix())
+	if err != nil {
+		return err
+	}
+	drained := make(map[string]NodeDrainState, len(drainResp.Kvs))
+	for _, kv := range drainResp.Kvs {
+		var state NodeDrainState
+		if err := json.Unmarshal(kv.Value, &state); err != nil {
+			continue
+		}
+		drained[state.NodeID] = state
+	}
+
 	members := map[string]NodeInfo{}
 	for _, kv := range resp.Kvs {
 		var m MemberLease
 		if err := json.Unmarshal(kv.Value, &m); err != nil {
 			continue
 		}
-		members[m.NodeID] = NodeInfo{ID: m.NodeID, Addr: strings.TrimRight(m.Addr, "/")}
+		_, drainRequested := drained[m.NodeID]
+		members[m.NodeID] = NodeInfo{
+			ID:             m.NodeID,
+			Addr:           strings.TrimRight(m.Addr, "/"),
+			DrainRequested: drainRequested,
+		}
 	}
 	s.membersMu.Lock()
 	s.members = members
@@ -77,7 +94,26 @@ func (s *Server) watchMembers(ctx context.Context) {
 			log.Printf("watch members error: %v", wr.Err())
 			continue
 		}
-		_ = s.loadMembers(context.Background())
+		if err := s.loadMembers(context.Background()); err != nil {
+			log.Printf("load members failed: %v", err)
+			continue
+		}
+		go s.maybeRebalanceRouting(context.Background())
+	}
+}
+
+func (s *Server) watchDrainStates(ctx context.Context) {
+	watchCh := s.etcd.Watch(ctx, s.drainPrefix, clientv3.WithPrefix())
+	for wr := range watchCh {
+		if wr.Err() != nil {
+			log.Printf("watch drain states error: %v", wr.Err())
+			continue
+		}
+		if err := s.loadMembers(context.Background()); err != nil {
+			log.Printf("load members after drain update failed: %v", err)
+			continue
+		}
+		go s.maybeRebalanceRouting(context.Background())
 	}
 }
 
@@ -95,9 +131,11 @@ func (s *Server) loadRouting(ctx context.Context) error {
 		routing[routingMapKey(rt.IndexName, rt.Day, rt.ShardID)] = rt
 	}
 	s.routingMu.Lock()
+	oldRouting := s.routing
 	s.routing = routing
 	s.routingMu.Unlock()
 	s.clearReplicaCache()
+	s.syncAssignedShardsAsync(oldRouting, routing)
 	return nil
 }
 
@@ -121,11 +159,13 @@ func (s *Server) bootstrapRouting(ctx context.Context, indexName, day string, rf
 		rf = len(members)
 	}
 
-	nodes := make([]NodeInfo, 0, len(members))
-	for _, m := range members {
-		nodes = append(nodes, m)
+	nodes := routingCandidateNodes(members, rf)
+	if len(nodes) == 0 {
+		return nil, errors.New("no routable members available")
 	}
-	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
+	if rf > len(nodes) {
+		rf = len(nodes)
+	}
 
 	sess, err := concurrency.NewSession(s.etcd)
 	if err != nil {

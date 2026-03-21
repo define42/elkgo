@@ -33,6 +33,8 @@ const (
 type integrationCluster struct {
 	coordinatorURL string
 	nodeURLs       []string
+	imageName      string
+	networkName    string
 }
 
 type integrationDataset struct {
@@ -103,6 +105,19 @@ func TestIntegration_ClusterDashboardAndSearch(t *testing.T) {
 	validateDashboardSnapshot(t, routing, dataset)
 	validateSharedTokenSearch(t, cluster.coordinatorURL, dataset)
 	validateTargetedSearch(t, cluster.coordinatorURL, dataset)
+
+	newNodeURL := startIntegrationNode(t, ctx, cluster, integrationClusterNodes+1)
+	cluster.nodeURLs = append(cluster.nodeURLs, newNodeURL)
+	waitForClusterMembership(t, cluster.nodeURLs, integrationClusterNodes+1)
+	waitForRoutingOnAllNodes(t, cluster.nodeURLs, len(dataset.Days)*enforcedShardsPerDay)
+	waitForRebalancedShardsOnNode(t, newNodeURL, fmt.Sprintf("n%d", integrationClusterNodes+1), dataset)
+	validateSharedTokenSearch(t, cluster.coordinatorURL, dataset)
+
+	drainedNodeID := "n4"
+	drainedNodeURL := cluster.nodeURLs[3]
+	setNodeDrain(t, cluster.coordinatorURL, drainedNodeID, true)
+	waitForNodeToDrain(t, drainedNodeURL, drainedNodeID, dataset)
+	validateSharedTokenSearch(t, cluster.coordinatorURL, dataset)
 }
 
 func startIntegrationCluster(t *testing.T, ctx context.Context) integrationCluster {
@@ -199,7 +214,46 @@ func startIntegrationCluster(t *testing.T, ctx context.Context) integrationClust
 	return integrationCluster{
 		coordinatorURL: nodeURLs[0],
 		nodeURLs:       nodeURLs,
+		imageName:      imageName,
+		networkName:    net.Name,
 	}
+}
+
+func startIntegrationNode(t *testing.T, ctx context.Context, cluster integrationCluster, nodeNumber int) string {
+	t.Helper()
+
+	alias := fmt.Sprintf("elkgo%d", nodeNumber)
+	nodeID := fmt.Sprintf("n%d", nodeNumber)
+	cmd := []string{
+		"-mode=both",
+		"-node-id=" + nodeID,
+		"-listen=:8081",
+		"-data=/app/data",
+		"-etcd-endpoints=http://etcd:2379",
+		fmt.Sprintf("-replication-factor=%d", integrationReplicationFactor),
+	}
+
+	node, err := testcontainers.Run(ctx, cluster.imageName,
+		testcontainers.WithEnv(map[string]string{
+			"ELKGO_PUBLIC_ADDR": "http://" + alias + ":8081",
+		}),
+		testcontainers.WithExposedPorts("8081/tcp"),
+		testcontainers.WithCmd(cmd...),
+		tcnetwork.WithNetworkName([]string{alias}, cluster.networkName),
+		testcontainers.WithWaitStrategy(
+			wait.ForHTTP("/healthz").WithPort("8081/tcp").WithStartupTimeout(2*time.Minute),
+		),
+	)
+	if err != nil {
+		t.Fatalf("start app container %s: %v", nodeID, err)
+	}
+	testcontainers.CleanupContainer(t, node)
+
+	baseURL, err := node.Endpoint(ctx, "http")
+	if err != nil {
+		t.Fatalf("get endpoint for %s: %v", nodeID, err)
+	}
+	return baseURL
 }
 
 func buildIntegrationDataset(reference time.Time) integrationDataset {
@@ -482,6 +536,123 @@ func validateTargetedSearch(t *testing.T, coordinatorURL string, dataset integra
 	}
 	if !strings.Contains(fmt.Sprint(hit.Source["message"]), dataset.TargetToken) {
 		t.Fatalf("targeted hit does not contain token %s", dataset.TargetToken)
+	}
+}
+
+func waitForRebalancedShardsOnNode(t *testing.T, nodeURL, nodeID string, dataset integrationDataset) {
+	t.Helper()
+
+	daySet := make(map[string]struct{}, len(dataset.Days))
+	for _, day := range dataset.Days {
+		daySet[day] = struct{}{}
+	}
+
+	waitForCondition(t, 2*time.Minute, 3*time.Second, "node "+nodeID+" to receive rebalanced shards", func() (bool, error) {
+		var snapshot struct {
+			Routing map[string]RoutingEntry `json:"routing"`
+			Members map[string]NodeInfo     `json:"members"`
+		}
+		if err := getJSON(newIntegrationClient(30*time.Second), nodeURL+"/admin/routing", &snapshot); err != nil {
+			return false, err
+		}
+		if _, ok := snapshot.Members[nodeID]; !ok {
+			return false, fmt.Errorf("node %s not present in membership snapshot", nodeID)
+		}
+
+		owned := 0
+		totalDocs := 0
+		for _, route := range snapshot.Routing {
+			if _, ok := daySet[route.Day]; !ok {
+				continue
+			}
+			if !routeHasReplica(route, nodeID) {
+				continue
+			}
+
+			owned++
+			var stats ShardStatsResponse
+			statsURL := fmt.Sprintf(
+				"%s/internal/shard_stats?index=%s&day=%s&shard=%d",
+				nodeURL,
+				url.QueryEscape(route.IndexName),
+				url.QueryEscape(route.Day),
+				route.ShardID,
+			)
+			if err := getJSON(newIntegrationClient(30*time.Second), statsURL, &stats); err != nil {
+				return false, err
+			}
+			totalDocs += int(stats.EventCount)
+		}
+
+		if owned == 0 {
+			return false, fmt.Errorf("node %s does not own any rebalanced shards yet", nodeID)
+		}
+		if totalDocs == 0 {
+			return false, fmt.Errorf("node %s owns %d shards but has not finished syncing data", nodeID, owned)
+		}
+		return true, nil
+	})
+}
+
+func waitForNodeToDrain(t *testing.T, nodeURL, nodeID string, dataset integrationDataset) {
+	t.Helper()
+
+	daySet := make(map[string]struct{}, len(dataset.Days))
+	for _, day := range dataset.Days {
+		daySet[day] = struct{}{}
+	}
+
+	waitForCondition(t, 2*time.Minute, 3*time.Second, "node "+nodeID+" to finish draining", func() (bool, error) {
+		var snapshot struct {
+			Routing map[string]RoutingEntry `json:"routing"`
+			Members map[string]NodeInfo     `json:"members"`
+		}
+		if err := getJSON(newIntegrationClient(30*time.Second), nodeURL+"/admin/routing", &snapshot); err != nil {
+			return false, err
+		}
+
+		member, ok := snapshot.Members[nodeID]
+		if !ok {
+			return false, fmt.Errorf("node %s not present in membership snapshot", nodeID)
+		}
+		if !member.DrainRequested {
+			return false, fmt.Errorf("node %s has not entered drain mode", nodeID)
+		}
+
+		for _, route := range snapshot.Routing {
+			if _, ok := daySet[route.Day]; !ok {
+				continue
+			}
+			if routeHasReplica(route, nodeID) {
+				return false, fmt.Errorf("node %s still owns %s/%s shard %d", nodeID, route.IndexName, route.Day, route.ShardID)
+			}
+		}
+
+		return true, nil
+	})
+}
+
+func setNodeDrain(t *testing.T, coordinatorURL, nodeID string, drain bool) {
+	t.Helper()
+
+	requestURL := fmt.Sprintf(
+		"%s/admin/nodes/drain?node_id=%s&drain=%t",
+		coordinatorURL,
+		url.QueryEscape(nodeID),
+		drain,
+	)
+	req, err := http.NewRequest(http.MethodPost, requestURL, nil)
+	if err != nil {
+		t.Fatalf("build drain request: %v", err)
+	}
+	resp, err := newIntegrationClient(30 * time.Second).Do(req)
+	if err != nil {
+		t.Fatalf("send drain request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		t.Fatalf("drain request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 }
 

@@ -12,8 +12,9 @@ import (
 type Document map[string]interface{}
 
 type NodeInfo struct {
-	ID   string `json:"id"`
-	Addr string `json:"addr"`
+	ID             string `json:"id"`
+	Addr           string `json:"addr"`
+	DrainRequested bool   `json:"drain_requested"`
 }
 
 const enforcedShardsPerDay = 48
@@ -31,6 +32,11 @@ type MemberLease struct {
 	NodeID    string `json:"node_id"`
 	Addr      string `json:"addr"`
 	StartedAt string `json:"started_at"`
+}
+
+type NodeDrainState struct {
+	NodeID      string `json:"node_id"`
+	RequestedAt string `json:"requested_at"`
 }
 
 type ShardHit struct {
@@ -130,6 +136,10 @@ type Server struct {
 	replicaCacheMu sync.RWMutex
 	replicaCache   map[string]string
 
+	shardSyncMu         sync.Mutex
+	shardSyncingVersion map[string]int64
+	shardSyncedVersion  map[string]int64
+
 	etcd              *clientv3.Client
 	etcdEndpoints     []string
 	memberLeaseID     clientv3.LeaseID
@@ -144,4 +154,5 @@ type Server struct {
 	replicationFactor int
 	routingPrefix     string
 	memberPrefix      string
+	drainPrefix       string
 }

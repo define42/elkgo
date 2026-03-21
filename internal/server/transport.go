@@ -116,11 +116,19 @@ func postNDJSONWithClient(ctx context.Context, client *http.Client, url string, 
 }
 
 func (s *Server) getJSON(ctx context.Context, url string, out any) error {
+	return getJSONWithClient(ctx, s.client, url, out)
+}
+
+func (s *Server) getJSONWithTimeout(ctx context.Context, url string, timeout time.Duration, out any) error {
+	return getJSONWithClient(ctx, &http.Client{Timeout: timeout}, url, out)
+}
+
+func getJSONWithClient(ctx context.Context, client *http.Client, url string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
-	resp, err := s.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

@@ -458,6 +458,120 @@ func TestHandleSearch_GenericNumericAndDateFields(t *testing.T) {
 	}
 }
 
+func TestBuildRoutingRebalanceUpdates_AddsNewNodeToExistingDay(t *testing.T) {
+	day := "2026-03-21"
+	indexName := "events"
+
+	initialMembers := []NodeInfo{
+		{ID: "n1", Addr: "http://n1:8081"},
+		{ID: "n2", Addr: "http://n2:8081"},
+		{ID: "n3", Addr: "http://n3:8081"},
+		{ID: "n4", Addr: "http://n4:8081"},
+	}
+	expandedMembers := map[string]NodeInfo{
+		"n1": {ID: "n1", Addr: "http://n1:8081"},
+		"n2": {ID: "n2", Addr: "http://n2:8081"},
+		"n3": {ID: "n3", Addr: "http://n3:8081"},
+		"n4": {ID: "n4", Addr: "http://n4:8081"},
+		"n5": {ID: "n5", Addr: "http://n5:8081"},
+	}
+
+	routes := make(map[string]RoutingEntry, enforcedShardsPerDay)
+	for shardID, replicas := range generateRouting(initialMembers, enforcedShardsPerDay, 3) {
+		entry := RoutingEntry{
+			IndexName: indexName,
+			Day:       day,
+			ShardID:   shardID,
+			Replicas:  replicas,
+			Version:   1,
+			UpdatedAt: "2026-03-21T00:00:00Z",
+		}
+		routes[routingMapKey(indexName, day, shardID)] = entry
+	}
+
+	updates := buildRoutingRebalanceUpdates(expandedMembers, routes)
+	if len(updates) == 0 {
+		t.Fatalf("expected rebalance to produce route updates")
+	}
+
+	updatedRoutes := make(map[string]RoutingEntry, len(routes))
+	for key, route := range routes {
+		updatedRoutes[key] = route
+	}
+	for _, update := range updates {
+		updatedRoutes[routingMapKey(update.IndexName, update.Day, update.ShardID)] = update
+	}
+
+	n5ShardCount := 0
+	for _, route := range updatedRoutes {
+		if route.IndexName != indexName || route.Day != day {
+			continue
+		}
+		if len(route.Replicas) != 3 {
+			t.Fatalf("expected replication factor 3, got %d for shard %d", len(route.Replicas), route.ShardID)
+		}
+		if routeHasReplica(route, "n5") {
+			n5ShardCount++
+		}
+	}
+
+	if n5ShardCount == 0 {
+		t.Fatalf("expected rebalanced routing to assign shards to n5")
+	}
+}
+
+func TestBuildRoutingRebalanceUpdates_ExcludesDrainedNodeWhenCapacityAllows(t *testing.T) {
+	day := "2026-03-21"
+	indexName := "events"
+
+	members := []NodeInfo{
+		{ID: "n1", Addr: "http://n1:8081"},
+		{ID: "n2", Addr: "http://n2:8081"},
+		{ID: "n3", Addr: "http://n3:8081"},
+		{ID: "n4", Addr: "http://n4:8081"},
+	}
+	routes := make(map[string]RoutingEntry, enforcedShardsPerDay)
+	for shardID, replicas := range generateRouting(members, enforcedShardsPerDay, 3) {
+		routes[routingMapKey(indexName, day, shardID)] = RoutingEntry{
+			IndexName: indexName,
+			Day:       day,
+			ShardID:   shardID,
+			Replicas:  replicas,
+			Version:   1,
+			UpdatedAt: "2026-03-21T00:00:00Z",
+		}
+	}
+
+	updatedMembers := map[string]NodeInfo{
+		"n1": {ID: "n1", Addr: "http://n1:8081"},
+		"n2": {ID: "n2", Addr: "http://n2:8081"},
+		"n3": {ID: "n3", Addr: "http://n3:8081"},
+		"n4": {ID: "n4", Addr: "http://n4:8081", DrainRequested: true},
+	}
+
+	updates := buildRoutingRebalanceUpdates(updatedMembers, routes)
+	if len(updates) == 0 {
+		t.Fatalf("expected rebalance to update routes when node becomes drained")
+	}
+
+	finalRoutes := make(map[string]RoutingEntry, len(routes))
+	for key, route := range routes {
+		finalRoutes[key] = route
+	}
+	for _, route := range updates {
+		finalRoutes[routingMapKey(route.IndexName, route.Day, route.ShardID)] = route
+	}
+
+	for _, route := range finalRoutes {
+		if route.IndexName != indexName || route.Day != day {
+			continue
+		}
+		if routeHasReplica(route, "n4") {
+			t.Fatalf("expected drained node n4 to be removed from shard %d replicas=%v", route.ShardID, route.Replicas)
+		}
+	}
+}
+
 func TestHandleAvailableIndexes_ReturnsSortedIndexesAndDays(t *testing.T) {
 	s := New(Config{
 		Mode:              "both",

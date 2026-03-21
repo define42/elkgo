@@ -223,6 +223,16 @@ const ClusterPageHTML = `<!DOCTYPE html>
       color: var(--text);
     }
 
+    .badge.draining-badge {
+      border-color: rgba(255, 212, 133, 0.28);
+      background: rgba(255, 212, 133, 0.14);
+    }
+
+    .badge.drained-badge {
+      border-color: rgba(141, 240, 183, 0.24);
+      background: rgba(141, 240, 183, 0.12);
+    }
+
     .badge.primary-badge {
       border-color: rgba(248, 190, 116, 0.24);
       background: rgba(248, 190, 116, 0.11);
@@ -232,6 +242,18 @@ const ClusterPageHTML = `<!DOCTYPE html>
       display: flex;
       flex-wrap: wrap;
       gap: 10px;
+    }
+
+    .node-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .node-actions button {
+      padding: 9px 14px;
     }
 
     .node-stat {
@@ -482,6 +504,54 @@ const ClusterPageHTML = `<!DOCTYPE html>
       });
     }
 
+    function buildNodePlacements(routes) {
+      const placementsByNode = {};
+      routes.forEach(function (route) {
+        (route.replicas || []).forEach(function (nodeID, idx) {
+          if (!placementsByNode[nodeID]) {
+            placementsByNode[nodeID] = { total: 0, primary: 0, replica: 0, events: 0, placements: [] };
+          }
+          placementsByNode[nodeID].total += 1;
+          placementsByNode[nodeID].events += Number(route.event_count || 0);
+          if (idx === 0) {
+            placementsByNode[nodeID].primary += 1;
+          } else {
+            placementsByNode[nodeID].replica += 1;
+          }
+          placementsByNode[nodeID].placements.push(route.index_name + "/" + route.day + "/s" + route.shard_id + " · " + Number(route.event_count || 0));
+        });
+      });
+      return placementsByNode;
+    }
+
+    function nodeStatus(member, overallStats) {
+      if (member && member.drain_requested) {
+        if ((overallStats && overallStats.total) > 0) {
+          return {
+            label: "draining",
+            badgeClass: "badge draining-badge",
+            actionLabel: "Resume",
+            actionDrain: false,
+            note: overallStats.total + " shard copies still assigned"
+          };
+        }
+        return {
+          label: "drained",
+          badgeClass: "badge drained-badge",
+          actionLabel: "Resume",
+          actionDrain: false,
+          note: "All shard copies moved away"
+        };
+      }
+      return {
+        label: "active",
+        badgeClass: "badge",
+        actionLabel: "Drain",
+        actionDrain: true,
+        note: "Available for shard allocation"
+      };
+    }
+
     function renderSummary(data) {
       const routes = filteredRoutes(data);
       const members = membersArray(data);
@@ -509,34 +579,10 @@ const ClusterPageHTML = `<!DOCTYPE html>
 
     function renderNodes(data) {
       const routes = filteredRoutes(data);
+      const allRoutes = routingArray(data);
       const members = membersArray(data);
-      const placementsByNode = {};
-
-      members.forEach(function (member) {
-        placementsByNode[member.id] = {
-          total: 0,
-          primary: 0,
-          replica: 0,
-          events: 0,
-          placements: []
-        };
-      });
-
-      routes.forEach(function (route) {
-        (route.replicas || []).forEach(function (nodeID, idx) {
-          if (!placementsByNode[nodeID]) {
-            placementsByNode[nodeID] = { total: 0, primary: 0, replica: 0, events: 0, placements: [] };
-          }
-          placementsByNode[nodeID].total += 1;
-          placementsByNode[nodeID].events += Number(route.event_count || 0);
-          if (idx === 0) {
-            placementsByNode[nodeID].primary += 1;
-          } else {
-            placementsByNode[nodeID].replica += 1;
-          }
-          placementsByNode[nodeID].placements.push(route.index_name + "/" + route.day + "/s" + route.shard_id + " · " + Number(route.event_count || 0));
-        });
-      });
+      const placementsByNode = buildNodePlacements(routes);
+      const overallPlacementsByNode = buildNodePlacements(allRoutes);
 
       if (members.length === 0) {
         nodesEl.innerHTML = '<div class="empty">No nodes are currently registered.</div>';
@@ -545,6 +591,8 @@ const ClusterPageHTML = `<!DOCTYPE html>
 
       nodesEl.innerHTML = members.map(function (member) {
         const stats = placementsByNode[member.id] || { total: 0, primary: 0, replica: 0, events: 0, placements: [] };
+        const overallStats = overallPlacementsByNode[member.id] || { total: 0, primary: 0, replica: 0, events: 0, placements: [] };
+        const status = nodeStatus(member, overallStats);
         const placementPreview = stats.placements.slice(0, 8).map(function (placement) {
           return '<span class="placement-pill">' + placement + '</span>';
         }).join("");
@@ -557,13 +605,17 @@ const ClusterPageHTML = `<!DOCTYPE html>
                 '<h3>' + member.id + '</h3>' +
                 '<div class="muted">' + member.addr + '</div>' +
               '</div>' +
-              '<span class="badge">active</span>' +
+              '<span class="' + status.badgeClass + '">' + status.label + '</span>' +
             '</div>' +
             '<div class="node-stats">' +
               '<div class="node-stat"><div class="muted">Shard copies</div><strong>' + stats.total + '</strong></div>' +
               '<div class="node-stat"><div class="muted">Primary</div><strong>' + stats.primary + '</strong></div>' +
               '<div class="node-stat"><div class="muted">Replica</div><strong>' + stats.replica + '</strong></div>' +
               '<div class="node-stat"><div class="muted">Events</div><strong>' + stats.events + '</strong></div>' +
+            '</div>' +
+            '<div class="node-actions">' +
+              '<div class="muted">' + status.note + '</div>' +
+              '<button class="' + (status.actionDrain ? 'secondary' : 'primary') + '" type="button" data-node-id="' + member.id + '" data-drain="' + (status.actionDrain ? '1' : '0') + '">' + status.actionLabel + '</button>' +
             '</div>' +
             '<div class="placement-list">' + (placementPreview || '<span class="muted">No routed shards for current filter.</span>') + overflow + '</div>' +
           '</article>';
@@ -641,6 +693,27 @@ const ClusterPageHTML = `<!DOCTYPE html>
       }
     }
 
+    async function updateNodeDrain(nodeID, drainRequested, button) {
+      button.disabled = true;
+      setStatus((drainRequested ? "Requesting drain for " : "Resuming ") + nodeID + "...");
+      try {
+        const response = await fetch("/admin/nodes/drain?node_id=" + encodeURIComponent(nodeID) + "&drain=" + (drainRequested ? "1" : "0"), {
+          method: "POST",
+          headers: { "Accept": "application/json" }
+        });
+        if (!response.ok) {
+          const message = await response.text();
+          throw new Error(message || ("Request failed with status " + response.status));
+        }
+        await loadClusterState();
+        setStatus((drainRequested ? "Drain requested for " : "Drain cleared for ") + nodeID + ".");
+      } catch (error) {
+        setStatus(error.message || "Failed to update node drain state.", true);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     function ensureRefreshLoop() {
       if (refreshTimer) {
         clearInterval(refreshTimer);
@@ -655,6 +728,11 @@ const ClusterPageHTML = `<!DOCTYPE html>
     autoRefreshEl.addEventListener("change", ensureRefreshLoop);
     indexFilterEl.addEventListener("change", function () { if (rawData) renderAll(rawData); });
     dayFilterEl.addEventListener("change", function () { if (rawData) renderAll(rawData); });
+    nodesEl.addEventListener("click", function (event) {
+      const button = event.target.closest("button[data-node-id]");
+      if (!button) return;
+      updateNodeDrain(button.dataset.nodeId, button.dataset.drain === "1", button);
+    });
 
     ensureRefreshLoop();
     loadClusterState();

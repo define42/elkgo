@@ -14,20 +14,37 @@ import (
 )
 
 func (s *Server) dumpAllDocs(idx bleve.Index) ([]Document, error) {
-	req := bleve.NewSearchRequestOptions(bleve.NewMatchAllQuery(), 10000, 0, false)
-	req.Fields = []string{"*"}
-	res, err := idx.Search(req)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Document, 0, len(res.Hits))
-	for _, h := range res.Hits {
-		doc := docFromBleveFields(h.Fields)
-		if _, ok := doc["id"]; !ok {
-			doc["id"] = h.ID
+	const pageSize = 500
+
+	var after []string
+	out := make([]Document, 0, pageSize)
+	for {
+		req := bleve.NewSearchRequestOptions(bleve.NewMatchAllQuery(), pageSize, 0, false)
+		req.Fields = []string{"*"}
+		req.SortBy([]string{"_id"})
+		if len(after) > 0 {
+			req.SetSearchAfter(after)
 		}
-		out = append(out, doc)
+
+		res, err := idx.Search(req)
+		if err != nil {
+			return nil, err
+		}
+		if len(res.Hits) == 0 {
+			break
+		}
+
+		for _, h := range res.Hits {
+			doc := docFromBleveFields(h.Fields)
+			if _, ok := doc["id"]; !ok {
+				doc["id"] = h.ID
+			}
+			out = append(out, doc)
+		}
+
+		after = res.Hits[len(res.Hits)-1].Sort
 	}
+
 	sort.Slice(out, func(i, j int) bool { return fmt.Sprint(out[i]["id"]) < fmt.Sprint(out[j]["id"]) })
 	return out, nil
 }
@@ -63,6 +80,22 @@ func normalizeBleveField(v interface{}) interface{} {
 	}
 }
 
+func (s *Server) shardIndexPath(indexName, day string, shardID int) string {
+	return filepath.Join(s.dataDir, s.nodeID, indexName, day, fmt.Sprintf("shard-%02d.bleve", shardID))
+}
+
+func (s *Server) localShardExists(indexName, day string, shardID int) bool {
+	cacheKey := partitionKey(indexName, day, shardID)
+	s.mu.RLock()
+	_, ok := s.indexes[cacheKey]
+	s.mu.RUnlock()
+	if ok {
+		return true
+	}
+	_, err := os.Stat(s.shardIndexPath(indexName, day, shardID))
+	return err == nil
+}
+
 func (s *Server) openShardIndex(indexName, day string, shardID int) (bleve.Index, error) {
 	cacheKey := partitionKey(indexName, day, shardID)
 	s.mu.RLock()
@@ -76,7 +109,7 @@ func (s *Server) openShardIndex(indexName, day string, shardID int) (bleve.Index
 	if idx, ok := s.indexes[cacheKey]; ok {
 		return idx, nil
 	}
-	path := filepath.Join(s.dataDir, s.nodeID, indexName, day, fmt.Sprintf("shard-%02d.bleve", shardID))
+	path := s.shardIndexPath(indexName, day, shardID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}

@@ -11,20 +11,23 @@ import (
 
 func New(cfg Config) *Server {
 	return &Server{
-		nodeID:            cfg.NodeID,
-		listen:            cfg.Listen,
-		publicAddr:        cfg.PublicAddr,
-		dataDir:           cfg.DataDir,
-		mode:              cfg.Mode,
-		client:            &http.Client{Timeout: 8 * time.Second},
-		indexes:           map[string]bleve.Index{},
-		replicaCache:      map[string]string{},
-		etcdEndpoints:     append([]string(nil), cfg.ETCDEndpoints...),
-		routing:           map[string]RoutingEntry{},
-		members:           map[string]NodeInfo{},
-		replicationFactor: cfg.ReplicationFactor,
-		routingPrefix:     "/distsearch/routing/",
-		memberPrefix:      "/distsearch/members/",
+		nodeID:              cfg.NodeID,
+		listen:              cfg.Listen,
+		publicAddr:          cfg.PublicAddr,
+		dataDir:             cfg.DataDir,
+		mode:                cfg.Mode,
+		client:              &http.Client{Timeout: 8 * time.Second},
+		indexes:             map[string]bleve.Index{},
+		replicaCache:        map[string]string{},
+		shardSyncingVersion: map[string]int64{},
+		shardSyncedVersion:  map[string]int64{},
+		etcdEndpoints:       append([]string(nil), cfg.ETCDEndpoints...),
+		routing:             map[string]RoutingEntry{},
+		members:             map[string]NodeInfo{},
+		replicationFactor:   cfg.ReplicationFactor,
+		routingPrefix:       "/distsearch/routing/",
+		memberPrefix:        "/distsearch/members/",
+		drainPrefix:         "/distsearch/drain/",
 	}
 }
 
@@ -44,6 +47,7 @@ func (s *Server) Run() error {
 	}
 
 	go s.watchMembers(context.Background())
+	go s.watchDrainStates(context.Background())
 	go s.watchRouting(context.Background())
 
 	mux := http.NewServeMux()
@@ -73,6 +77,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/admin/bootstrap", s.handleBootstrap)
 	mux.HandleFunc("/admin/indexes", s.handleAvailableIndexes)
+	mux.HandleFunc("/admin/nodes/drain", s.handleNodeDrain)
 	mux.HandleFunc("/admin/routing", s.handleRouting)
 	mux.HandleFunc("/index", s.handleIndex)
 	mux.HandleFunc("/bulk", s.handleBulkIngest)

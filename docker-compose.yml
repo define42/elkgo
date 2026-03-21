@@ -61,7 +61,7 @@ services:
       - etcd
     environment:
       ELKGO_PUBLIC_ADDR: http://elkgo3:8081
-      ELKGO_ADD_TEST_DATA: ${ELKGO_ADD_TEST_DATA:-false}
+      ELKGO_ADD_TEST_DATA: ${ELKGO_ADD_TEST_DATA:-true}
     command:
       - -mode=both
       - -node-id=n3

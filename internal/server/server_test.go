@@ -1,12 +1,17 @@
 package server
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"sort"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -82,6 +87,67 @@ func TestHandleSearch_BlankQueryAcrossDayRangeReturnsAllDocuments(t *testing.T) 
 	}
 }
 
+func TestHandleBulkIngest_NDJSONIndexesDocuments(t *testing.T) {
+	s, ts := newTestHTTPServer(t)
+
+	day := "2026-03-21"
+	setTestRoute(s, "events", day, keyToShard("bulk-a", enforcedShardsPerDay), []string{"n1"})
+	setTestRoute(s, "events", day, keyToShard("bulk-b", enforcedShardsPerDay), []string{"n1"})
+
+	body := strings.Join([]string{
+		`{"id":"bulk-a","timestamp":"2026-03-21T09:00:00Z","title":"Bulk A","message":"first bulk event"}`,
+		`{"id":"bulk-b","timestamp":"2026-03-21T09:05:00Z","title":"Bulk B","message":"second bulk event"}`,
+	}, "\n") + "\n"
+
+	resp, err := http.Post(ts.URL+"/bulk?index=events", "application/x-ndjson", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("bulk request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	var bulkPayload struct {
+		OK      bool     `json:"ok"`
+		Index   string   `json:"index"`
+		Indexed int      `json:"indexed"`
+		Failed  int      `json:"failed"`
+		Errors  []string `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&bulkPayload); err != nil {
+		t.Fatalf("decode bulk response: %v", err)
+	}
+
+	if !bulkPayload.OK || bulkPayload.Index != "events" || bulkPayload.Indexed != 2 || bulkPayload.Failed != 0 {
+		t.Fatalf("unexpected bulk payload: %#v", bulkPayload)
+	}
+	if len(bulkPayload.Errors) != 0 {
+		t.Fatalf("expected no bulk errors, got %#v", bulkPayload.Errors)
+	}
+
+	searchResp, err := http.Get(ts.URL + "/search?index=events&day=" + url.QueryEscape(day) + "&k=10")
+	if err != nil {
+		t.Fatalf("search request failed: %v", err)
+	}
+	defer searchResp.Body.Close()
+
+	if searchResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected search status 200, got %d", searchResp.StatusCode)
+	}
+
+	var searchPayload struct {
+		Hits []ShardHit `json:"hits"`
+	}
+	if err := json.NewDecoder(searchResp.Body).Decode(&searchPayload); err != nil {
+		t.Fatalf("decode search response: %v", err)
+	}
+	if len(searchPayload.Hits) != 2 {
+		t.Fatalf("expected 2 search hits, got %d", len(searchPayload.Hits))
+	}
+}
+
 func TestHandleAvailableIndexes_ReturnsSortedIndexesAndDays(t *testing.T) {
 	s := New(Config{
 		Mode:              "both",
@@ -128,6 +194,107 @@ func TestHandleAvailableIndexes_ReturnsSortedIndexesAndDays(t *testing.T) {
 	}
 }
 
+func TestHandleRouting_WithStatsIncludesShardEventCounts(t *testing.T) {
+	s, ts := newTestHTTPServer(t)
+
+	day := "2026-03-21"
+	shardID := 0
+	setTestRoute(s, "events", day, shardID, []string{"n1"})
+
+	indexTestDocument(t, s, "events", day, shardID, "stats-a", Document{
+		"id":        "stats-a",
+		"timestamp": day + "T09:00:00Z",
+		"title":     "Stats A",
+		"message":   "first stats event",
+	})
+	indexTestDocument(t, s, "events", day, shardID, "stats-b", Document{
+		"id":        "stats-b",
+		"timestamp": day + "T09:10:00Z",
+		"title":     "Stats B",
+		"message":   "second stats event",
+	})
+
+	resp, err := http.Get(ts.URL + "/admin/routing?stats=1")
+	if err != nil {
+		t.Fatalf("routing request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		Routing map[string]RoutingEntryStats `json:"routing"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode routing response: %v", err)
+	}
+
+	route, ok := payload.Routing[routingMapKey("events", day, shardID)]
+	if !ok {
+		t.Fatalf("expected route to be present")
+	}
+	if route.EventCount != 2 {
+		t.Fatalf("expected event_count=2, got %d", route.EventCount)
+	}
+	if route.CountError != "" {
+		t.Fatalf("expected no count error, got %q", route.CountError)
+	}
+}
+
+func TestPostDocumentsInBatches_SplitsLargeBulkRequests(t *testing.T) {
+	s := New(Config{
+		Mode:              "both",
+		NodeID:            "n1",
+		Listen:            ":0",
+		DataDir:           t.TempDir(),
+		ReplicationFactor: 1,
+	})
+	defer s.Close()
+
+	docs := make([]Document, 0, 2505)
+	for i := 0; i < 2505; i++ {
+		docs = append(docs, Document{
+			"id":        "evt-" + strconv.Itoa(i+1),
+			"timestamp": "2026-03-21T12:00:00Z",
+		})
+	}
+
+	requests := 0
+	lineCounts := make([]int, 0, 3)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		requests++
+		lines := bytes.Count(body, []byte{'\n'})
+		lineCounts = append(lineCounts, lines)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"indexed": lines,
+			"failed":  0,
+			"errors":  []string{},
+		})
+	}))
+	defer ts.Close()
+
+	indexed, err := s.postDocumentsInBatches(context.Background(), ts.URL+"/bulk?index=events", docs, 1000)
+	if err != nil {
+		t.Fatalf("postDocumentsInBatches returned error: %v", err)
+	}
+	if indexed != len(docs) {
+		t.Fatalf("expected indexed=%d, got %d", len(docs), indexed)
+	}
+	if requests != 3 {
+		t.Fatalf("expected 3 batched requests, got %d", requests)
+	}
+	if !reflect.DeepEqual(lineCounts, []int{1000, 1000, 505}) {
+		t.Fatalf("unexpected batch sizes: %#v", lineCounts)
+	}
+}
+
 func TestNormalizeGenericDocument_NormalizesMappedFieldsAndPartitionDay(t *testing.T) {
 	doc := Document{
 		"id":        "evt-1",
@@ -163,6 +330,79 @@ func TestNormalizeGenericDocument_NormalizesMappedFieldsAndPartitionDay(t *testi
 	}
 	if !reflect.DeepEqual(doc["tags"], []string{"prod", "9", "true"}) {
 		t.Fatalf("expected tags to be normalized, got %#v", doc["tags"])
+	}
+}
+
+func TestTestDataDocuments_GeneratesTenThousandEvents(t *testing.T) {
+	day := "2026-03-21"
+	docs := testDataDocuments(day)
+
+	if len(docs) != testDataEventsPerDay {
+		t.Fatalf("expected %d docs, got %d", testDataEventsPerDay, len(docs))
+	}
+
+	seen := make(map[string]struct{}, len(docs))
+	for i, doc := range docs {
+		id, ok := doc["id"].(string)
+		if !ok || id == "" {
+			t.Fatalf("doc %d missing string id: %#v", i, doc["id"])
+		}
+		if _, exists := seen[id]; exists {
+			t.Fatalf("duplicate id found: %s", id)
+		}
+		seen[id] = struct{}{}
+
+		ts, ok := doc["timestamp"].(string)
+		if !ok || len(ts) < len(day) || ts[:len(day)] != day {
+			t.Fatalf("doc %d timestamp does not match requested day: %#v", i, doc["timestamp"])
+		}
+	}
+
+	if _, ok := seen["evt-00001"]; !ok {
+		t.Fatalf("expected first deterministic id to exist")
+	}
+	if _, ok := seen["evt-10000"]; !ok {
+		t.Fatalf("expected last deterministic id to exist")
+	}
+}
+
+func TestTestDataDays_ReturnsLastSevenDays(t *testing.T) {
+	reference := time.Date(2026, 3, 21, 14, 30, 0, 0, time.UTC)
+
+	days := testDataDays(reference)
+	want := []string{
+		"2026-03-15",
+		"2026-03-16",
+		"2026-03-17",
+		"2026-03-18",
+		"2026-03-19",
+		"2026-03-20",
+		"2026-03-21",
+	}
+
+	if !reflect.DeepEqual(days, want) {
+		t.Fatalf("unexpected test data days: got %#v want %#v", days, want)
+	}
+}
+
+func TestTestDataGenerator_CoversSeventyThousandEventsAcrossSevenDays(t *testing.T) {
+	days := testDataDays(time.Date(2026, 3, 21, 0, 0, 0, 0, time.UTC))
+	total := 0
+
+	for _, day := range days {
+		docs := testDataDocuments(day)
+		total += len(docs)
+
+		if len(docs) != testDataEventsPerDay {
+			t.Fatalf("expected %d docs for %s, got %d", testDataEventsPerDay, day, len(docs))
+		}
+		if got := docs[0]["timestamp"]; got == nil || got.(string)[:len(day)] != day {
+			t.Fatalf("expected first timestamp for %s to stay on that day, got %#v", day, got)
+		}
+	}
+
+	if total != testDataTotalEvents {
+		t.Fatalf("expected %d total docs, got %d", testDataTotalEvents, total)
 	}
 }
 

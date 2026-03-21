@@ -32,6 +32,10 @@ func (s *Server) dumpAllDocs(idx bleve.Index) ([]Document, error) {
 	return out, nil
 }
 
+func shardEventCount(idx bleve.Index) (uint64, error) {
+	return idx.DocCount()
+}
+
 func docFromBleveFields(fields map[string]interface{}) Document {
 	doc := Document{}
 	for k, v := range fields {

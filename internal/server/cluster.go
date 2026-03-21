@@ -14,6 +14,15 @@ import (
 	"go.etcd.io/etcd/client/v3/concurrency"
 )
 
+const (
+	testDataDayCount      = 7
+	testDataTotalEvents   = 70000
+	testDataEventsPerDay  = testDataTotalEvents / testDataDayCount
+	testDataBulkBatchSize = 1000
+	testDataMarkerVersion = "v3"
+	testDataBulkTimeout   = 5 * time.Minute
+)
+
 func (s *Server) connectEtcd(_ context.Context) error {
 	cli, err := clientv3.New(clientv3.Config{Endpoints: s.etcdEndpoints, DialTimeout: 5 * time.Second})
 	if err != nil {
@@ -162,7 +171,7 @@ func (s *Server) bootstrapRouting(ctx context.Context, indexName, day string, rf
 
 func (s *Server) ensureTestData(ctx context.Context) {
 	const indexName = "events"
-	day := time.Now().UTC().Format("2006-01-02")
+	days := testDataDays(time.Now().UTC())
 	waitUntil := time.Now().Add(30 * time.Second)
 	targetMembers := s.replicationFactor
 	if targetMembers < 1 {
@@ -189,96 +198,124 @@ func (s *Server) ensureTestData(ctx context.Context) {
 	}
 	defer func() { _ = elect.Resign(context.Background()) }()
 
-	markerKey := "/distsearch/admin/test-data-loaded/" + indexName + "/" + day
-	if resp, err := s.etcd.Get(ctx, markerKey); err == nil && len(resp.Kvs) > 0 {
-		return
-	}
+	seeded := 0
+	for _, day := range days {
+		markerKey := "/distsearch/admin/test-data-loaded/" + testDataMarkerVersion + "/" + indexName + "/" + day
+		if resp, err := s.etcd.Get(ctx, markerKey); err == nil && len(resp.Kvs) > 0 {
+			continue
+		}
 
-	if _, err := s.bootstrapRouting(ctx, indexName, day, s.replicationFactor); err != nil {
-		log.Printf("bootstrap test data routing failed: %v", err)
-		return
-	}
-
-	for _, doc := range testDataDocuments(day) {
-		if err := s.postJSON(ctx, s.advertisedAddr()+"/index?index="+indexName, doc, nil); err != nil {
-			log.Printf("seed test document failed: %v", err)
+		if _, err := s.bootstrapRouting(ctx, indexName, day, s.replicationFactor); err != nil {
+			log.Printf("bootstrap test data routing failed for day %s: %v", day, err)
 			return
 		}
+
+		indexed, err := s.postDocumentsInBatches(ctx, s.advertisedAddr()+"/bulk?index="+indexName, testDataDocuments(day), testDataBulkBatchSize)
+		if err != nil {
+			log.Printf("seed test bulk ingest failed for day %s: %v", day, err)
+			return
+		}
+		if _, err := s.etcd.Put(ctx, markerKey, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			log.Printf("mark test data loaded failed for day %s: %v", day, err)
+			return
+		}
+		seeded += indexed
 	}
-	if _, err := s.etcd.Put(ctx, markerKey, time.Now().UTC().Format(time.RFC3339)); err != nil {
-		log.Printf("mark test data loaded failed: %v", err)
-		return
+	log.Printf("test data ready index=%s from=%s to=%s seeded=%d total=%d", indexName, days[0], days[len(days)-1], seeded, testDataTotalEvents)
+}
+
+func (s *Server) postDocumentsInBatches(ctx context.Context, url string, docs []Document, batchSize int) (int, error) {
+	if len(docs) == 0 {
+		return 0, nil
 	}
-	log.Printf("test data loaded index=%s day=%s", indexName, day)
+	if batchSize < 1 {
+		batchSize = len(docs)
+	}
+
+	indexed := 0
+	for start := 0; start < len(docs); start += batchSize {
+		end := start + batchSize
+		if end > len(docs) {
+			end = len(docs)
+		}
+
+		var resp struct {
+			OK      bool     `json:"ok"`
+			Indexed int      `json:"indexed"`
+			Failed  int      `json:"failed"`
+			Errors  []string `json:"errors"`
+		}
+		if err := s.postNDJSONWithTimeout(ctx, url, docs[start:end], testDataBulkTimeout, &resp); err != nil {
+			return indexed, err
+		}
+		if resp.Failed > 0 {
+			return indexed, fmt.Errorf("batch %d-%d partially failed: indexed=%d failed=%d errors=%v", start, end-1, resp.Indexed, resp.Failed, resp.Errors)
+		}
+		indexed += resp.Indexed
+	}
+	return indexed, nil
+}
+
+func testDataDays(reference time.Time) []string {
+	base := reference.UTC().Truncate(24 * time.Hour)
+	days := make([]string, 0, testDataDayCount)
+	for offset := testDataDayCount - 1; offset >= 0; offset-- {
+		days = append(days, base.AddDate(0, 0, -offset).Format("2006-01-02"))
+	}
+	return days
 }
 
 func testDataDocuments(day string) []Document {
-	return []Document{
-		{
-			"id":        "evt-1",
-			"timestamp": day + "T08:15:00Z",
-			"title":     "API timeout",
-			"service":   "api",
-			"level":     "error",
-			"message":   "timeout talking to etcd during bootstrap",
-			"tags":      []string{"prod", "search", "timeouts"},
-			"count":     3,
-			"score":     98,
-		},
-		{
-			"id":        "evt-2",
-			"timestamp": day + "T09:03:00Z",
-			"title":     "Indexer recovered",
-			"service":   "ingest",
-			"level":     "info",
-			"message":   "replica repair completed for shard 12",
-			"tags":      []string{"repair", "replication"},
-			"count":     1,
-			"score":     73,
-		},
-		{
-			"id":        "evt-3",
-			"timestamp": day + "T09:17:00Z",
-			"title":     "Search latency spike",
-			"service":   "api",
-			"level":     "warn",
-			"message":   "query latency exceeded 250ms on hot shard",
-			"tags":      []string{"latency", "search"},
-			"count":     5,
-			"score":     84,
-		},
-		{
-			"id":        "evt-4",
-			"timestamp": day + "T10:44:00Z",
-			"title":     "Node joined cluster",
-			"service":   "membership",
-			"level":     "info",
-			"message":   "new replica node registered with etcd lease",
-			"tags":      []string{"membership", "cluster"},
-			"count":     1,
-			"score":     65,
-		},
-		{
-			"id":        "evt-5",
-			"timestamp": day + "T11:26:00Z",
-			"title":     "Disk pressure",
-			"service":   "storage",
-			"level":     "warn",
-			"message":   "bleve segment compaction delayed due to disk pressure",
-			"tags":      []string{"storage", "bleve"},
-			"count":     2,
-			"score":     79,
-		},
-		{
-			"id":        "evt-6",
-			"timestamp": day + "T12:41:00Z",
-			"title":     "Customer search error",
-			"service":   "frontend",
-			"level":     "error",
-			"message":   "customer search request returned partial shard failures",
-			"tags":      []string{"frontend", "search", "errors"},
-			"count":     4,
-			"score":     91,
-		},
+	services := []string{"api", "ingest", "membership", "storage", "frontend", "scheduler", "billing", "worker"}
+	levels := []string{"info", "warn", "error"}
+	environments := []string{"prod", "stage", "dev"}
+	regions := []string{"eu-west", "us-east", "ap-south"}
+	issues := []struct {
+		title   string
+		message string
+		tag     string
+	}{
+		{title: "API timeout", message: "timeout talking to etcd during bootstrap", tag: "timeouts"},
+		{title: "Indexer recovered", message: "replica repair completed for shard sync", tag: "repair"},
+		{title: "Search latency spike", message: "query latency exceeded service threshold", tag: "latency"},
+		{title: "Node joined cluster", message: "new replica node registered with etcd lease", tag: "cluster"},
+		{title: "Disk pressure", message: "bleve segment compaction delayed due to disk pressure", tag: "storage"},
+		{title: "Customer search error", message: "customer search request returned partial shard failures", tag: "errors"},
+		{title: "Shard rebalanced", message: "primary ownership moved after membership change", tag: "routing"},
+		{title: "Worker backlog", message: "background processing queue depth crossed warning threshold", tag: "backlog"},
 	}
+
+	base, err := time.Parse("2006-01-02", day)
+	if err != nil {
+		base = time.Now().UTC().Truncate(24 * time.Hour)
+	}
+	base = base.UTC()
+
+	docs := make([]Document, 0, testDataEventsPerDay)
+	for i := 0; i < testDataEventsPerDay; i++ {
+		issue := issues[i%len(issues)]
+		service := services[i%len(services)]
+		level := levels[(i/3)%len(levels)]
+		environment := environments[(i/7)%len(environments)]
+		region := regions[(i/11)%len(regions)]
+		timestamp := base.Add(time.Duration((i*7)%86400) * time.Second).Format(time.RFC3339)
+
+		docs = append(docs, Document{
+			"id":        fmt.Sprintf("evt-%05d", i+1),
+			"timestamp": timestamp,
+			"title":     issue.title,
+			"service":   service,
+			"level":     level,
+			"message":   fmt.Sprintf("%s on %s in %s", issue.message, service, region),
+			"tags": []string{
+				environment,
+				service,
+				issue.tag,
+				level,
+			},
+			"count": 1 + (i % 9),
+			"score": 55 + (i % 45),
+		})
+	}
+	return docs
 }

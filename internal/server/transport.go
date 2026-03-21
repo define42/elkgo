@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 func (s *Server) postJSON(ctx context.Context, url string, body any, out any) error {
@@ -21,6 +22,43 @@ func (s *Server) postJSON(ctx context.Context, url string, body any, out any) er
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := s.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	if out != nil {
+		return json.NewDecoder(resp.Body).Decode(out)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
+func (s *Server) postNDJSON(ctx context.Context, url string, docs []Document, out any) error {
+	return postNDJSONWithClient(ctx, s.client, url, docs, out)
+}
+
+func (s *Server) postNDJSONWithTimeout(ctx context.Context, url string, docs []Document, timeout time.Duration, out any) error {
+	return postNDJSONWithClient(ctx, &http.Client{Timeout: timeout}, url, docs, out)
+}
+
+func postNDJSONWithClient(ctx context.Context, client *http.Client, url string, docs []Document, out any) error {
+	buf := new(bytes.Buffer)
+	enc := json.NewEncoder(buf)
+	for _, doc := range docs {
+		if err := enc.Encode(doc); err != nil {
+			return err
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-ndjson")
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

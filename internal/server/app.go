@@ -79,10 +79,12 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/indexes", s.handleAvailableIndexes)
 	mux.HandleFunc("/admin/routing", s.handleRouting)
 	mux.HandleFunc("/index", s.handleIndex)
+	mux.HandleFunc("/bulk", s.handleBulkIngest)
 	mux.HandleFunc("/search", s.handleSearch)
 	mux.HandleFunc("/internal/index", s.handleInternalIndex)
 	mux.HandleFunc("/internal/search_shard", s.handleSearchShard)
 	mux.HandleFunc("/internal/dump_docs", s.handleDumpDocs)
+	mux.HandleFunc("/internal/shard_stats", s.handleShardStats)
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {

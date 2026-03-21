@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -122,6 +123,7 @@ func (s *Server) handleAvailableIndexes(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleRouting(w http.ResponseWriter, r *http.Request) {
 	indexName := strings.TrimSpace(r.URL.Query().Get("index"))
 	day := strings.TrimSpace(r.URL.Query().Get("day"))
+	includeStats := queryEnabled(r, "stats") || queryEnabled(r, "include_counts")
 	if raw := r.URL.Query().Get("shard"); raw != "" {
 		shardID, err := strconv.Atoi(raw)
 		if err != nil {
@@ -133,10 +135,19 @@ func (s *Server) handleRouting(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unknown shard", http.StatusNotFound)
 			return
 		}
+		if includeStats {
+			writeJSON(w, http.StatusOK, s.routingEntryStats(r.Context(), rt))
+			return
+		}
 		writeJSON(w, http.StatusOK, rt)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"routing": s.snapshotRouting(), "members": s.snapshotMembers(), "shards_per_day": enforcedShardsPerDay})
+	routes := s.snapshotRouting()
+	if includeStats {
+		writeJSON(w, http.StatusOK, map[string]any{"routing": s.routingStatsMap(r.Context(), routes), "members": s.snapshotMembers(), "shards_per_day": enforcedShardsPerDay})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"routing": routes, "members": s.snapshotMembers(), "shards_per_day": enforcedShardsPerDay})
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -154,68 +165,21 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	docID, day, err := normalizeGenericDocument(doc)
+	status, out, err := s.ingestDocument(r.Context(), indexName, doc)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, err.Error(), status)
 		return
 	}
-	shardID, route, err := s.routeForDoc(indexName, day, docID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-	if len(route.Replicas) == 0 {
-		http.Error(w, "no replicas for shard", http.StatusServiceUnavailable)
-		return
-	}
-	primary := route.Replicas[0]
-	if primary == s.nodeID {
-		s.handlePrimaryIndex(w, r, indexName, day, shardID, route, docID, doc)
-		return
-	}
-	primaryAddr, ok := s.memberAddr(primary)
-	if !ok {
-		http.Error(w, "primary not registered", http.StatusServiceUnavailable)
-		return
-	}
-	var out map[string]any
-	if err := s.postJSON(r.Context(), primaryAddr+"/internal/index", internalIndexRequest{IndexName: indexName, Day: day, ShardID: shardID, DocID: docID, Doc: doc}, &out); err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, status, out)
 }
 
 func (s *Server) handlePrimaryIndex(w http.ResponseWriter, r *http.Request, indexName, day string, shardID int, route RoutingEntry, docID string, doc Document) {
-	idx, err := s.openShardIndex(indexName, day, shardID)
+	status, out, err := s.indexOnPrimary(r.Context(), indexName, day, shardID, route, docID, doc)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), status)
 		return
 	}
-	if err := idx.Index(docID, doc); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	acks := 1
-	var errs []string
-	for _, replica := range route.Replicas[1:] {
-		addr, ok := s.memberAddr(replica)
-		if !ok {
-			errs = append(errs, replica+": not registered")
-			continue
-		}
-		if err := s.postJSON(r.Context(), addr+"/internal/index", internalIndexRequest{IndexName: indexName, Day: day, ShardID: shardID, DocID: docID, Doc: doc}, nil); err != nil {
-			errs = append(errs, replica+": "+err.Error())
-			continue
-		}
-		acks++
-	}
-	quorum := len(route.Replicas)/2 + 1
-	if acks < quorum {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "index": indexName, "day": day, "shard": shardID, "primary": s.nodeID, "replicas": route.Replicas, "acks": acks, "quorum": quorum, "errors": errs})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "index": indexName, "day": day, "shard": shardID, "primary": s.nodeID, "replicas": route.Replicas, "acks": acks, "errors": errs})
+	writeJSON(w, status, out)
 }
 
 func (s *Server) handleInternalIndex(w http.ResponseWriter, r *http.Request) {
@@ -280,4 +244,78 @@ func (s *Server) handleDumpDocs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, DumpDocsResponse{Docs: docs})
+}
+
+func (s *Server) handleShardStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	indexName := strings.TrimSpace(r.URL.Query().Get("index"))
+	day := strings.TrimSpace(r.URL.Query().Get("day"))
+	shardID, err := strconv.Atoi(r.URL.Query().Get("shard"))
+	if err != nil {
+		http.Error(w, "missing or invalid shard", http.StatusBadRequest)
+		return
+	}
+	if !s.ownsReplica(indexName, day, shardID) {
+		http.Error(w, "replica not assigned", http.StatusForbidden)
+		return
+	}
+	idx, err := s.openShardIndex(indexName, day, shardID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	count, err := shardEventCount(idx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, ShardStatsResponse{
+		IndexName:  indexName,
+		Day:        day,
+		ShardID:    shardID,
+		EventCount: count,
+	})
+}
+
+func (s *Server) routingStatsMap(ctx context.Context, routes map[string]RoutingEntry) map[string]RoutingEntryStats {
+	out := make(map[string]RoutingEntryStats, len(routes))
+	for key, route := range routes {
+		out[key] = s.routingEntryStats(ctx, route)
+	}
+	return out
+}
+
+func (s *Server) routingEntryStats(ctx context.Context, route RoutingEntry) RoutingEntryStats {
+	out := RoutingEntryStats{RoutingEntry: route}
+	replicaNodeID, err := s.pickHealthyReplica(ctx, route.IndexName, route.Day, route.ShardID)
+	if err != nil {
+		out.CountError = err.Error()
+		return out
+	}
+	addr, ok := s.memberAddr(replicaNodeID)
+	if !ok {
+		out.CountError = "replica " + replicaNodeID + " has no address"
+		return out
+	}
+
+	var resp ShardStatsResponse
+	err = s.getJSON(ctx, addr+"/internal/shard_stats?index="+route.IndexName+"&day="+route.Day+"&shard="+strconv.Itoa(route.ShardID), &resp)
+	if err != nil {
+		out.CountError = err.Error()
+		return out
+	}
+	out.EventCount = resp.EventCount
+	return out
+}
+
+func queryEnabled(r *http.Request, key string) bool {
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }

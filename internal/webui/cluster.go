@@ -175,7 +175,7 @@ const ClusterPageHTML = `<!DOCTYPE html>
     }
 
     .summary-grid {
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(5, minmax(0, 1fr));
     }
 
     .metric {
@@ -274,7 +274,7 @@ const ClusterPageHTML = `<!DOCTYPE html>
     table {
       width: 100%;
       border-collapse: collapse;
-      min-width: 880px;
+      min-width: 980px;
     }
 
     th, td {
@@ -490,12 +490,16 @@ const ClusterPageHTML = `<!DOCTYPE html>
       const copies = routes.reduce(function (sum, route) {
         return sum + (Array.isArray(route.replicas) ? route.replicas.length : 0);
       }, 0);
+      const events = routes.reduce(function (sum, route) {
+        return sum + Number(route.event_count || 0);
+      }, 0);
 
       const metrics = [
         { label: "Visible nodes", value: String(members.length) },
         { label: "Shard routes", value: String(routes.length) },
         { label: "Indexes", value: String(indexes.size) },
-        { label: "Shard copies", value: String(copies) }
+        { label: "Shard copies", value: String(copies) },
+        { label: "Events", value: String(events) }
       ];
 
       summaryEl.innerHTML = metrics.map(function (metric) {
@@ -513,6 +517,7 @@ const ClusterPageHTML = `<!DOCTYPE html>
           total: 0,
           primary: 0,
           replica: 0,
+          events: 0,
           placements: []
         };
       });
@@ -520,15 +525,16 @@ const ClusterPageHTML = `<!DOCTYPE html>
       routes.forEach(function (route) {
         (route.replicas || []).forEach(function (nodeID, idx) {
           if (!placementsByNode[nodeID]) {
-            placementsByNode[nodeID] = { total: 0, primary: 0, replica: 0, placements: [] };
+            placementsByNode[nodeID] = { total: 0, primary: 0, replica: 0, events: 0, placements: [] };
           }
           placementsByNode[nodeID].total += 1;
+          placementsByNode[nodeID].events += Number(route.event_count || 0);
           if (idx === 0) {
             placementsByNode[nodeID].primary += 1;
           } else {
             placementsByNode[nodeID].replica += 1;
           }
-          placementsByNode[nodeID].placements.push(route.index_name + "/" + route.day + "/s" + route.shard_id);
+          placementsByNode[nodeID].placements.push(route.index_name + "/" + route.day + "/s" + route.shard_id + " · " + Number(route.event_count || 0));
         });
       });
 
@@ -538,7 +544,7 @@ const ClusterPageHTML = `<!DOCTYPE html>
       }
 
       nodesEl.innerHTML = members.map(function (member) {
-        const stats = placementsByNode[member.id] || { total: 0, primary: 0, replica: 0, placements: [] };
+        const stats = placementsByNode[member.id] || { total: 0, primary: 0, replica: 0, events: 0, placements: [] };
         const placementPreview = stats.placements.slice(0, 8).map(function (placement) {
           return '<span class="placement-pill">' + placement + '</span>';
         }).join("");
@@ -557,6 +563,7 @@ const ClusterPageHTML = `<!DOCTYPE html>
               '<div class="node-stat"><div class="muted">Shard copies</div><strong>' + stats.total + '</strong></div>' +
               '<div class="node-stat"><div class="muted">Primary</div><strong>' + stats.primary + '</strong></div>' +
               '<div class="node-stat"><div class="muted">Replica</div><strong>' + stats.replica + '</strong></div>' +
+              '<div class="node-stat"><div class="muted">Events</div><strong>' + stats.events + '</strong></div>' +
             '</div>' +
             '<div class="placement-list">' + (placementPreview || '<span class="muted">No routed shards for current filter.</span>') + overflow + '</div>' +
           '</article>';
@@ -577,11 +584,13 @@ const ClusterPageHTML = `<!DOCTYPE html>
           const className = idx === 0 ? 'replica-pill primary-badge' : 'replica-pill';
           return '<span class="' + className + '">' + nodeID + '</span>';
         }).join("");
+        const countText = route.count_error ? ('unavailable: ' + route.count_error) : String(Number(route.event_count || 0));
         return '' +
           '<tr>' +
             '<td><strong>' + route.index_name + '</strong></td>' +
             '<td>' + route.day + '</td>' +
             '<td>' + route.shard_id + '</td>' +
+            '<td>' + countText + '</td>' +
             '<td><span class="primary-node">' + primary + '</span></td>' +
             '<td><div class="replicas">' + replicaHTML + '</div></td>' +
             '<td>' + (route.updated_at || "") + '</td>' +
@@ -596,6 +605,7 @@ const ClusterPageHTML = `<!DOCTYPE html>
                 '<th>Index</th>' +
                 '<th>Day</th>' +
                 '<th>Shard</th>' +
+                '<th>Events</th>' +
                 '<th>Primary</th>' +
                 '<th>Replicas</th>' +
                 '<th>Updated</th>' +
@@ -616,7 +626,7 @@ const ClusterPageHTML = `<!DOCTYPE html>
     async function loadClusterState() {
       setStatus("Loading cluster state...");
       try {
-        const response = await fetch("/admin/routing", {
+        const response = await fetch("/admin/routing?stats=1", {
           headers: { "Accept": "application/json" }
         });
         if (!response.ok) {

@@ -66,6 +66,19 @@ type DumpDocsResponse struct {
 	Docs []Document `json:"docs"`
 }
 
+type ShardStatsResponse struct {
+	IndexName  string `json:"index_name"`
+	Day        string `json:"day"`
+	ShardID    int    `json:"shard_id"`
+	EventCount uint64 `json:"event_count"`
+}
+
+type RoutingEntryStats struct {
+	RoutingEntry
+	EventCount uint64 `json:"event_count"`
+	CountError string `json:"count_error,omitempty"`
+}
+
 type Config struct {
 	Mode              string
 	NodeID            string

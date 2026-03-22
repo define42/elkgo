@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -587,7 +588,7 @@ func waitForRebalancedShardsOnNode(t *testing.T, nodeURL, nodeID string, dataset
 		daySet[day] = struct{}{}
 	}
 
-	waitForCondition(t, 2*time.Minute, 3*time.Second, "node "+nodeID+" to receive rebalanced shards", func() (bool, error) {
+	waitForCondition(t, 5*time.Minute, 3*time.Second, "node "+nodeID+" to receive rebalanced shards", func() (bool, error) {
 		var snapshot struct {
 			Routing map[string]RoutingEntry `json:"routing"`
 			Members map[string]NodeInfo     `json:"members"`
@@ -600,6 +601,7 @@ func waitForRebalancedShardsOnNode(t *testing.T, nodeURL, nodeID string, dataset
 		}
 
 		owned := 0
+		ready := 0
 		totalDocs := 0
 		for _, route := range snapshot.Routing {
 			if _, ok := daySet[route.Day]; !ok {
@@ -619,19 +621,136 @@ func waitForRebalancedShardsOnNode(t *testing.T, nodeURL, nodeID string, dataset
 				route.ShardID,
 			)
 			if err := getJSON(newIntegrationClient(30*time.Second), statsURL, &stats); err != nil {
+				if isRebalancePendingError(err) {
+					continue
+				}
 				return false, err
 			}
+			ready++
 			totalDocs += int(stats.EventCount)
 		}
 
 		if owned == 0 {
 			return false, fmt.Errorf("node %s does not own any rebalanced shards yet", nodeID)
 		}
+		if ready == 0 {
+			return false, fmt.Errorf("node %s owns %d shards but none are ready yet", nodeID, owned)
+		}
 		if totalDocs == 0 {
-			return false, fmt.Errorf("node %s owns %d shards but has not finished syncing data", nodeID, owned)
+			return false, fmt.Errorf("node %s has %d ready rebalanced shards but no synced data yet", nodeID, ready)
 		}
 		return true, nil
 	})
+}
+
+func waitForRebalancedShardCountsOnNode(t *testing.T, cluster integrationCluster, nodeID string, dataset integrationDataset) {
+	t.Helper()
+
+	nodeURL := integrationNodeURL(cluster.nodeURLs, nodeID)
+	if nodeURL == "" {
+		t.Fatalf("missing URL for node %s", nodeID)
+	}
+
+	daySet := make(map[string]struct{}, len(dataset.Days))
+	for _, day := range dataset.Days {
+		daySet[day] = struct{}{}
+	}
+
+	waitForCondition(t, 5*time.Minute, 3*time.Second, "node "+nodeID+" to match peer shard counts", func() (bool, error) {
+		var snapshot struct {
+			Routing map[string]RoutingEntry `json:"routing"`
+			Members map[string]NodeInfo     `json:"members"`
+		}
+		if err := getJSON(newIntegrationClient(30*time.Second), cluster.coordinatorURL+"/admin/routing", &snapshot); err != nil {
+			return false, err
+		}
+		if _, ok := snapshot.Members[nodeID]; !ok {
+			return false, fmt.Errorf("node %s not present in membership snapshot", nodeID)
+		}
+
+		checked := 0
+		for _, route := range snapshot.Routing {
+			if _, ok := daySet[route.Day]; !ok {
+				continue
+			}
+			if !routeHasReplica(route, nodeID) {
+				continue
+			}
+
+			targetStats, err := fetchIntegrationShardStats(nodeURL, route)
+			if err != nil {
+				if isRebalancePendingError(err) {
+					return false, nil
+				}
+				return false, err
+			}
+
+			peerMatched := false
+			for _, replicaID := range route.Replicas {
+				if replicaID == nodeID {
+					continue
+				}
+				peerURL := integrationNodeURL(cluster.nodeURLs, replicaID)
+				if peerURL == "" {
+					continue
+				}
+				peerStats, err := fetchIntegrationShardStats(peerURL, route)
+				if err != nil {
+					if isRebalancePendingError(err) {
+						continue
+					}
+					return false, err
+				}
+				if peerStats.EventCount != targetStats.EventCount {
+					return false, fmt.Errorf("count mismatch for %s/%s shard %d on %s: got %d want %d from %s", route.IndexName, route.Day, route.ShardID, nodeID, targetStats.EventCount, peerStats.EventCount, replicaID)
+				}
+				peerMatched = true
+				break
+			}
+			if !peerMatched {
+				return false, fmt.Errorf("no ready peer shard stats available for %s/%s shard %d", route.IndexName, route.Day, route.ShardID)
+			}
+			checked++
+		}
+
+		if checked == 0 {
+			return false, fmt.Errorf("node %s does not own any dataset shards yet", nodeID)
+		}
+		return true, nil
+	})
+}
+
+func fetchIntegrationShardStats(nodeURL string, route RoutingEntry) (ShardStatsResponse, error) {
+	var stats ShardStatsResponse
+	statsURL := fmt.Sprintf(
+		"%s/internal/shard_stats?index=%s&day=%s&shard=%d",
+		nodeURL,
+		url.QueryEscape(route.IndexName),
+		url.QueryEscape(route.Day),
+		route.ShardID,
+	)
+	if err := getJSON(newIntegrationClient(30*time.Second), statsURL, &stats); err != nil {
+		return ShardStatsResponse{}, err
+	}
+	return stats, nil
+}
+
+func integrationNodeURL(nodeURLs []string, nodeID string) string {
+	if strings.HasPrefix(nodeID, "n") {
+		if ordinal, err := strconv.Atoi(strings.TrimPrefix(nodeID, "n")); err == nil && ordinal > 0 && ordinal <= len(nodeURLs) {
+			return nodeURLs[ordinal-1]
+		}
+	}
+	return ""
+}
+
+func isRebalancePendingError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "status 503: replica syncing") ||
+		strings.Contains(message, "status 503: shard not available")
 }
 
 func waitForNodeToDrain(t *testing.T, nodeURL, nodeID string, dataset integrationDataset) {

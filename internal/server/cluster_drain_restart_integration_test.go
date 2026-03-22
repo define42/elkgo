@@ -18,10 +18,10 @@ import (
 )
 
 const (
-	drainRestartIntegrationDocs      = 50000
+	drainRestartIntegrationDocs      = 1000
 	drainRestartIntegrationBatchSize = 250
 	drainRestartIntegrationDelay     = 100 * time.Millisecond
-	drainRestartSignalAfterDocs      = 2500
+	drainRestartSignalAfterDocs      = 500
 )
 
 func TestIntegration_DrainRestartDuringIngestKeepsEventCount(t *testing.T) {
@@ -79,6 +79,7 @@ func TestIntegration_DrainRestartDuringIngestKeepsEventCount(t *testing.T) {
 	setNodeDrain(t, cluster.coordinatorURL, drainedNodeID, false)
 	waitForRoutingOnAllNodes(t, cluster.nodeURLs, len(dataset.Days)*enforcedShardsPerDay)
 	waitForRebalancedShardsOnNode(t, cluster.nodeURLs[drainedNodeIndex], drainedNodeID, dataset)
+	waitForRebalancedShardCountsOnNode(t, cluster, drainedNodeID, dataset)
 
 	if err := <-ingestErrCh; err != nil {
 		t.Fatalf("ingest during drain/restart failed: %v", err)

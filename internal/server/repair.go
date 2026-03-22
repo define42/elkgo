@@ -3,10 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"strconv"
-	"strings"
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -299,69 +297,8 @@ func (s *Server) repairReplicaLoop(indexName, day string, shardID int, nodeID st
 }
 
 func (s *Server) repairReplica(route RoutingEntry, nodeID string) error {
-	addr, ok := s.memberAddr(nodeID)
-	if !ok {
-		return fmt.Errorf("replica not registered")
-	}
-
-	idx, err := s.openShardIndex(route.IndexName, route.Day, route.ShardID)
-	if err != nil {
-		return err
-	}
-	docs, err := s.dumpAllDocs(idx)
-	if err != nil {
-		return err
-	}
-	if len(docs) == 0 {
-		return nil
-	}
-
-	for start := 0; start < len(docs); start += shardSyncBatchSize {
-		end := start + shardSyncBatchSize
-		if end > len(docs) {
-			end = len(docs)
-		}
-
-		items := make([]internalIndexBatchItem, 0, end-start)
-		for _, doc := range docs[start:end] {
-			docCopy := cloneDocument(doc)
-			rawDocID, ok := docCopy["id"]
-			if !ok {
-				return fmt.Errorf("document missing id")
-			}
-			docID := strings.TrimSpace(fmt.Sprint(rawDocID))
-			if docID == "" || docID == "<nil>" {
-				return fmt.Errorf("document missing id")
-			}
-			docCopy["id"] = docID
-			if _, ok := docCopy["partition_day"]; !ok {
-				docCopy["partition_day"] = route.Day
-			}
-			items = append(items, internalIndexBatchItem{
-				DocID: docID,
-				Doc:   docCopy,
-			})
-		}
-
-		var resp internalIndexBatchResponse
-		ctx, cancel := context.WithTimeout(s.backgroundCtx, shardSyncTimeout)
-		err := s.postJSON(ctx, addr+"/internal/index_batch", internalIndexBatchRequest{
-			IndexName: route.IndexName,
-			Day:       route.Day,
-			ShardID:   route.ShardID,
-			Items:     items,
-			Replicate: false,
-		}, &resp)
-		cancel()
-		if err != nil {
-			return err
-		}
-		if !resp.OK {
-			return fmt.Errorf("replica repair batch rejected for %s/%s shard %d replica %s", route.IndexName, route.Day, route.ShardID, nodeID)
-		}
-	}
-
-	return nil
+	_, err := s.streamShardToReplica(route, nodeID)
+	return err
 }
 
 func sleepWithContext(ctx context.Context, delay time.Duration) bool {

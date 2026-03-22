@@ -119,6 +119,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/internal/index_batch", s.handleInternalIndexBatch)
 	mux.HandleFunc("/internal/search_shard", s.handleSearchShard)
 	mux.HandleFunc("/internal/dump_docs", s.handleDumpDocs)
+	mux.HandleFunc("/internal/stream_docs", s.handleStreamDocs)
 	mux.HandleFunc("/internal/shard_stats", s.handleShardStats)
 }
 

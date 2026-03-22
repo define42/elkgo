@@ -119,6 +119,44 @@ func (s *Server) getJSON(ctx context.Context, url string, out any) error {
 	return getJSONWithClient(ctx, s.client, url, out)
 }
 
+func (s *Server) streamDocuments(ctx context.Context, url string, onDoc func(Document) error) error {
+	return streamDocumentsWithClient(ctx, s.client, url, onDoc)
+}
+
+func (s *Server) streamDocumentsWithTimeout(ctx context.Context, url string, timeout time.Duration, onDoc func(Document) error) error {
+	return streamDocumentsWithClient(ctx, &http.Client{Timeout: timeout}, url, onDoc)
+}
+
+func streamDocumentsWithClient(ctx context.Context, client *http.Client, url string, onDoc func(Document) error) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var doc Document
+		if err := dec.Decode(&doc); err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		if err := onDoc(doc); err != nil {
+			return err
+		}
+	}
+}
+
 func (s *Server) getJSONWithTimeout(ctx context.Context, url string, timeout time.Duration, out any) error {
 	return getJSONWithClient(ctx, &http.Client{Timeout: timeout}, url, out)
 }

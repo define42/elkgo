@@ -119,8 +119,12 @@ func (s *Server) handleSearchShard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	idx, err := s.openShardIndex(req.IndexName, req.Day, req.ShardID)
+	idx, err := s.openExistingShardIndex(req.IndexName, req.Day, req.ShardID)
 	if err != nil {
+		if err == errShardIndexMissing {
+			http.Error(w, "shard not available", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

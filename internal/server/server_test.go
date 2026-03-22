@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -397,6 +398,30 @@ func TestHandleSearch_CachesReplicaAfterFailover(t *testing.T) {
 	}
 }
 
+func TestHandleSearchShard_DoesNotCreateMissingShard(t *testing.T) {
+	s, ts := newTestHTTPServer(t)
+
+	day := "2026-03-21"
+	shardID := 3
+	if s.localShardExists("events", day, shardID) {
+		t.Fatalf("expected shard to be absent before read")
+	}
+
+	body := `{"index_name":"events","day":"2026-03-21","shard_id":3,"query":"missing","k":10}`
+	resp, err := http.Post(ts.URL+"/internal/search_shard", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("search shard request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected status 503 for missing shard, got %d", resp.StatusCode)
+	}
+	if s.localShardExists("events", day, shardID) {
+		t.Fatalf("expected missing shard read to stay non-mutating")
+	}
+}
+
 func TestHandleIndex_PartialReplicaFailureSkipsStaleReplicaUntilRepair(t *testing.T) {
 	primary, primaryTS := newNamedTestHTTPServer(t, "n1")
 
@@ -557,6 +582,82 @@ func TestHandleIndex_PartialReplicaFailureSkipsStaleReplicaUntilRepair(t *testin
 	}
 	if staleSearchCalls.Load() == 0 {
 		t.Fatalf("expected repaired replica to serve searches once caught up")
+	}
+}
+
+func TestSyncShardAssignment_StreamsDocsFromReplica(t *testing.T) {
+	target, targetTS := newNamedTestHTTPServer(t, "n1")
+
+	streamCalls := 0
+	source, sourceTS := newWrappedTestHTTPServer(t, "n2", func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/internal/stream_docs":
+				streamCalls++
+			case "/internal/dump_docs":
+				t.Fatalf("unexpected legacy dump_docs path hit during shard sync")
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	day := "2026-03-21"
+	shardID := 9
+	setTestRoute(target, "events", day, shardID, []string{"n1", "n2"})
+	setTestRoute(source, "events", day, shardID, []string{"n2"})
+
+	target.membersMu.Lock()
+	target.members = map[string]NodeInfo{
+		"n1": {ID: "n1", Addr: targetTS.URL},
+		"n2": {ID: "n2", Addr: sourceTS.URL},
+	}
+	target.membersMu.Unlock()
+
+	indexTestDocument(t, source, "events", day, shardID, "sync-a", Document{
+		"id":        "sync-a",
+		"timestamp": day + "T10:00:00Z",
+		"message":   "first streamed doc",
+	})
+	indexTestDocument(t, source, "events", day, shardID, "sync-b", Document{
+		"id":        "sync-b",
+		"timestamp": day + "T10:05:00Z",
+		"message":   "second streamed doc",
+	})
+
+	task := shardSyncTask{
+		current: RoutingEntry{
+			IndexName: "events",
+			Day:       day,
+			ShardID:   shardID,
+			Replicas:  []string{"n1", "n2"},
+			Version:   2,
+		},
+		previous: RoutingEntry{
+			IndexName: "events",
+			Day:       day,
+			ShardID:   shardID,
+			Replicas:  []string{"n2"},
+			Version:   1,
+		},
+	}
+
+	if err := target.syncShardAssignment(context.Background(), task); err != nil {
+		t.Fatalf("sync shard assignment failed: %v", err)
+	}
+	if streamCalls == 0 {
+		t.Fatalf("expected shard sync to use streamed docs endpoint")
+	}
+
+	idx, err := target.openExistingShardIndex("events", day, shardID)
+	if err != nil {
+		t.Fatalf("open restored shard: %v", err)
+	}
+	count, err := idx.DocCount()
+	if err != nil {
+		t.Fatalf("count restored docs: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 restored docs, got %d", count)
 	}
 }
 

@@ -289,8 +289,12 @@ func (s *Server) handleDumpDocs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "replica not assigned", http.StatusForbidden)
 		return
 	}
-	idx, err := s.openShardIndex(indexName, day, shardID)
+	idx, err := s.openExistingShardIndex(indexName, day, shardID)
 	if err != nil {
+		if err == errShardIndexMissing {
+			http.Error(w, "shard not available", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -300,6 +304,55 @@ func (s *Server) handleDumpDocs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, DumpDocsResponse{Docs: docs})
+}
+
+func (s *Server) handleStreamDocs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	indexName := strings.TrimSpace(r.URL.Query().Get("index"))
+	day := strings.TrimSpace(r.URL.Query().Get("day"))
+	shardID, err := strconv.Atoi(r.URL.Query().Get("shard"))
+	if err != nil {
+		http.Error(w, "missing or invalid shard", http.StatusBadRequest)
+		return
+	}
+	if !s.ownsReplica(indexName, day, shardID) && !s.localShardExists(indexName, day, shardID) {
+		http.Error(w, "replica not assigned", http.StatusForbidden)
+		return
+	}
+
+	idx, err := s.openExistingShardIndex(indexName, day, shardID)
+	if err != nil {
+		if err == errShardIndexMissing {
+			http.Error(w, "shard not available", http.StatusServiceUnavailable)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	flusher, _ := w.(http.Flusher)
+	enc := json.NewEncoder(w)
+	streamed := 0
+	if err := streamAllDocs(idx, func(doc Document) error {
+		if err := enc.Encode(doc); err != nil {
+			return err
+		}
+		streamed++
+		if flusher != nil && streamed%100 == 0 {
+			flusher.Flush()
+		}
+		return nil
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if flusher != nil {
+		flusher.Flush()
+	}
 }
 
 func (s *Server) handleShardStats(w http.ResponseWriter, r *http.Request) {
@@ -318,8 +371,12 @@ func (s *Server) handleShardStats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "replica not assigned", http.StatusForbidden)
 		return
 	}
-	idx, err := s.openShardIndex(indexName, day, shardID)
+	idx, err := s.openExistingShardIndex(indexName, day, shardID)
 	if err != nil {
+		if err == errShardIndexMissing {
+			http.Error(w, "shard not available", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

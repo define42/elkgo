@@ -508,28 +508,24 @@ func (s *Server) syncShardAssignment(ctx context.Context, task shardSyncTask) er
 		return nil
 	}
 
-	docs, sourceNodeID, err := s.fetchShardDocuments(ctx, task)
+	restored, sourceNodeID, err := s.restoreShardDocumentsFromCandidates(ctx, task)
 	if err != nil {
 		return err
 	}
-	if len(docs) == 0 {
+	if restored == 0 {
 		return nil
 	}
 
-	if err := s.restoreShardDocuments(task.current, docs); err != nil {
-		return err
-	}
-
-	log.Printf("shard sync restored %d docs for %s/%s shard %d from %s", len(docs), task.current.IndexName, task.current.Day, task.current.ShardID, sourceNodeID)
+	log.Printf("shard sync restored %d docs for %s/%s shard %d from %s", restored, task.current.IndexName, task.current.Day, task.current.ShardID, sourceNodeID)
 	return nil
 }
 
-func (s *Server) fetchShardDocuments(ctx context.Context, task shardSyncTask) ([]Document, string, error) {
+func (s *Server) restoreShardDocumentsFromCandidates(ctx context.Context, task shardSyncTask) (int, string, error) {
 	candidates := sourceReplicaCandidates(task.previous, task.current, s.nodeID)
 	errorsOut := make([]string, 0, len(candidates))
 
 	requestURLSuffix := fmt.Sprintf(
-		"/internal/dump_docs?index=%s&day=%s&shard=%d",
+		"/internal/stream_docs?index=%s&day=%s&shard=%d",
 		url.QueryEscape(task.current.IndexName),
 		url.QueryEscape(task.current.Day),
 		task.current.ShardID,
@@ -542,18 +538,20 @@ func (s *Server) fetchShardDocuments(ctx context.Context, task shardSyncTask) ([
 			continue
 		}
 
-		var dump DumpDocsResponse
-		if err := s.getJSONWithTimeout(ctx, addr+requestURLSuffix, shardSyncTimeout, &dump); err != nil {
+		restored, err := s.restoreStreamedShardDocuments(task.current, func(onDoc func(Document) error) error {
+			return s.streamDocumentsWithTimeout(ctx, addr+requestURLSuffix, shardSyncTimeout, onDoc)
+		})
+		if err != nil {
 			errorsOut = append(errorsOut, nodeID+": "+err.Error())
 			continue
 		}
-		return dump.Docs, nodeID, nil
+		return restored, nodeID, nil
 	}
 
 	if len(errorsOut) == 0 {
-		return nil, "", fmt.Errorf("no source replicas available")
+		return 0, "", fmt.Errorf("no source replicas available")
 	}
-	return nil, "", fmt.Errorf("%s", strings.Join(errorsOut, "; "))
+	return 0, "", fmt.Errorf("%s", strings.Join(errorsOut, "; "))
 }
 
 func sourceReplicaCandidates(previous, current RoutingEntry, selfNodeID string) []string {
@@ -579,38 +577,6 @@ func sourceReplicaCandidates(previous, current RoutingEntry, selfNodeID string) 
 	}
 
 	return out
-}
-
-func (s *Server) restoreShardDocuments(route RoutingEntry, docs []Document) error {
-	for start := 0; start < len(docs); start += shardSyncBatchSize {
-		end := start + shardSyncBatchSize
-		if end > len(docs) {
-			end = len(docs)
-		}
-
-		items := make([]internalIndexBatchItem, 0, end-start)
-		for _, doc := range docs[start:end] {
-			docCopy := cloneDocument(doc)
-			docID := strings.TrimSpace(fmt.Sprint(docCopy["id"]))
-			if docID == "" {
-				return fmt.Errorf("document missing id")
-			}
-			docCopy["id"] = docID
-			if _, ok := docCopy["partition_day"]; !ok {
-				docCopy["partition_day"] = route.Day
-			}
-			items = append(items, internalIndexBatchItem{
-				DocID: docID,
-				Doc:   docCopy,
-			})
-		}
-
-		if err := s.indexBatchLocal(route.IndexName, route.Day, route.ShardID, items); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 func cloneDocument(doc Document) Document {

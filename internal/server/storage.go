@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -13,11 +12,12 @@ import (
 	blevemapping "github.com/blevesearch/bleve/v2/mapping"
 )
 
-func (s *Server) dumpAllDocs(idx bleve.Index) ([]Document, error) {
+var errShardIndexMissing = errors.New("shard index missing")
+
+func streamAllDocs(idx bleve.Index, fn func(Document) error) error {
 	const pageSize = 500
 
 	var after []string
-	out := make([]Document, 0, pageSize)
 	for {
 		req := bleve.NewSearchRequestOptions(bleve.NewMatchAllQuery(), pageSize, 0, false)
 		req.Fields = []string{"*"}
@@ -28,7 +28,7 @@ func (s *Server) dumpAllDocs(idx bleve.Index) ([]Document, error) {
 
 		res, err := idx.Search(req)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if len(res.Hits) == 0 {
 			break
@@ -39,13 +39,28 @@ func (s *Server) dumpAllDocs(idx bleve.Index) ([]Document, error) {
 			if _, ok := doc["id"]; !ok {
 				doc["id"] = h.ID
 			}
-			out = append(out, doc)
+			if err := fn(doc); err != nil {
+				return err
+			}
 		}
 
 		after = res.Hits[len(res.Hits)-1].Sort
 	}
 
-	sort.Slice(out, func(i, j int) bool { return fmt.Sprint(out[i]["id"]) < fmt.Sprint(out[j]["id"]) })
+	return nil
+}
+
+func (s *Server) dumpAllDocs(idx bleve.Index) ([]Document, error) {
+	const pageSize = 500
+
+	out := make([]Document, 0, pageSize)
+	if err := streamAllDocs(idx, func(doc Document) error {
+		out = append(out, cloneDocument(doc))
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
 	return out, nil
 }
 
@@ -97,6 +112,14 @@ func (s *Server) localShardExists(indexName, day string, shardID int) bool {
 }
 
 func (s *Server) openShardIndex(indexName, day string, shardID int) (bleve.Index, error) {
+	return s.openShardIndexWithMode(indexName, day, shardID, true)
+}
+
+func (s *Server) openExistingShardIndex(indexName, day string, shardID int) (bleve.Index, error) {
+	return s.openShardIndexWithMode(indexName, day, shardID, false)
+}
+
+func (s *Server) openShardIndexWithMode(indexName, day string, shardID int, createIfMissing bool) (bleve.Index, error) {
 	cacheKey := partitionKey(indexName, day, shardID)
 	s.mu.RLock()
 	idx, ok := s.indexes[cacheKey]
@@ -110,13 +133,19 @@ func (s *Server) openShardIndex(indexName, day string, shardID int) (bleve.Index
 		return idx, nil
 	}
 	path := s.shardIndexPath(indexName, day, shardID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, err
-	}
 	var err error
 	if _, statErr := os.Stat(path); statErr == nil {
 		idx, err = bleve.Open(path)
 	} else {
+		if !createIfMissing {
+			if errors.Is(statErr, os.ErrNotExist) {
+				return nil, errShardIndexMissing
+			}
+			return nil, statErr
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return nil, err
+		}
 		idx, err = bleve.New(path, buildIndexMapping())
 	}
 	if err != nil {

@@ -16,6 +16,9 @@ var gzipWriterPool = sync.Pool{
 	New: func() any { return gzip.NewWriter(nil) },
 }
 
+// gzipReaderPool has no New function because gzip.NewReader requires a
+// valid reader to parse the header. First call falls back to gzip.NewReader;
+// subsequent calls reuse pooled readers via Reset.
 var gzipReaderPool sync.Pool
 
 func (s *Server) postJSON(ctx context.Context, url string, body any, out any) error {

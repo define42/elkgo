@@ -75,7 +75,12 @@ func (s *Server) handleBulkIngest(w http.ResponseWriter, r *http.Request) {
 	bufPtr := scannerBufPool.Get().(*[]byte)
 	scanner := bufio.NewScanner(bodyReader)
 	scanner.Buffer(*bufPtr, scannerBufMax)
-	defer scannerBufPool.Put(bufPtr)
+	defer func() {
+		// Discard oversized buffers to avoid holding excess memory in the pool.
+		if cap(*bufPtr) <= scannerBufInitial*2 {
+			scannerBufPool.Put(bufPtr)
+		}
+	}()
 
 	lineNo := 0
 	indexed := 0

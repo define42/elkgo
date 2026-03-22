@@ -215,6 +215,11 @@ func (s *Server) loadRouting(ctx context.Context) error {
 		return err
 	}
 	s.resumeReplicaRepairLoops()
+	go func() {
+		if err := s.cleanupExpiredLocalShardDays(time.Now().UTC()); err != nil {
+			log.Printf("cleanup expired local shards failed: %v", err)
+		}
+	}()
 	return nil
 }
 

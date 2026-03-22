@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -35,6 +36,7 @@ func TestEmbeddedEtcdLifecycle_WatchesAndRepairState(t *testing.T) {
 	go s.watchDrainStates(watchCtx)
 	go s.watchOfflineStates(watchCtx)
 	go s.watchRouting(watchCtx)
+	go s.watchIndexRetentionPolicies(watchCtx)
 	go s.watchReplicaRepairStates(watchCtx)
 
 	member := MemberLease{
@@ -76,6 +78,18 @@ func TestEmbeddedEtcdLifecycle_WatchesAndRepairState(t *testing.T) {
 	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "routing watch load", func() (bool, error) {
 		got, ok := s.getRouting(route.IndexName, route.Day, route.ShardID)
 		return ok && len(got.Replicas) == 2 && got.Replicas[1] == "n2", nil
+	})
+
+	retentionPolicy := IndexRetentionPolicy{
+		IndexName:     "policy-only",
+		RetentionDays: 30,
+		UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
+	}
+	putEtcdJSON(t, client, s.indexRetentionKey(retentionPolicy.IndexName), retentionPolicy)
+
+	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "index retention watch load", func() (bool, error) {
+		policy, ok := s.getIndexRetentionPolicy("policy-only")
+		return ok && policy.RetentionDays == 30, nil
 	})
 
 	repairState := ReplicaRepairState{
@@ -315,6 +329,219 @@ func TestAdminHandlersAndRebalance_WithEmbeddedEtcd(t *testing.T) {
 	})
 }
 
+func TestIndexRetentionPolicy_CleansExpiredRoutingAndLocalShards(t *testing.T) {
+	cluster := startEmbeddedEtcd(t)
+	client := newEmbeddedEtcdClient(t, cluster.endpoint)
+
+	coordinator, coordinatorTS := newEtcdBackedHTTPServer(t, cluster.endpoint, "n1", "both")
+	replica, _ := newEtcdBackedHTTPServer(t, cluster.endpoint, "n2", "both")
+
+	now := utcDayStart(time.Now().UTC())
+	oldDay := now.AddDate(0, 0, -45).Format("2006-01-02")
+	freshDay := now.AddDate(0, 0, -10).Format("2006-01-02")
+	shardID := 7
+
+	for _, day := range []string{oldDay, freshDay} {
+		putEtcdJSON(t, client, coordinator.routingKey("test1", day, shardID), RoutingEntry{
+			IndexName: "test1",
+			Day:       day,
+			ShardID:   shardID,
+			Replicas:  []string{"n1", "n2"},
+			Version:   time.Now().UnixNano(),
+			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+
+	if err := coordinator.loadRouting(context.Background()); err != nil {
+		t.Fatalf("coordinator loadRouting: %v", err)
+	}
+	if err := replica.loadRouting(context.Background()); err != nil {
+		t.Fatalf("replica loadRouting: %v", err)
+	}
+
+	indexTestDocument(t, coordinator, "test1", oldDay, shardID, "old-coordinator", Document{
+		"id":        "old-coordinator",
+		"timestamp": oldDay + "T09:00:00Z",
+		"message":   "expired coordinator shard",
+	})
+	indexTestDocument(t, coordinator, "test1", freshDay, shardID, "fresh-coordinator", Document{
+		"id":        "fresh-coordinator",
+		"timestamp": freshDay + "T09:00:00Z",
+		"message":   "fresh coordinator shard",
+	})
+	indexTestDocument(t, replica, "test1", oldDay, shardID, "old-replica", Document{
+		"id":        "old-replica",
+		"timestamp": oldDay + "T09:05:00Z",
+		"message":   "expired replica shard",
+	})
+	indexTestDocument(t, replica, "test1", freshDay, shardID, "fresh-replica", Document{
+		"id":        "fresh-replica",
+		"timestamp": freshDay + "T09:05:00Z",
+		"message":   "fresh replica shard",
+	})
+
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "coordinator old", path: coordinator.shardDayPath("test1", oldDay)},
+		{name: "coordinator fresh", path: coordinator.shardDayPath("test1", freshDay)},
+		{name: "replica old", path: replica.shardDayPath("test1", oldDay)},
+		{name: "replica fresh", path: replica.shardDayPath("test1", freshDay)},
+	} {
+		if _, err := os.Stat(tc.path); err != nil {
+			t.Fatalf("%s shard path missing before cleanup: %v", tc.name, err)
+		}
+	}
+
+	req, err := http.NewRequest(http.MethodPost, coordinatorTS.URL+"/admin/index_retention?index=test1&retention_days=30", nil)
+	if err != nil {
+		t.Fatalf("build retention policy request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /admin/index_retention failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body := readAllAndClose(t, resp)
+		t.Fatalf("expected retention policy status 200, got %d body=%q", resp.StatusCode, body)
+	}
+	var policyPayload struct {
+		OK     bool                 `json:"ok"`
+		Policy IndexRetentionPolicy `json:"policy"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&policyPayload); err != nil {
+		resp.Body.Close()
+		t.Fatalf("decode retention policy response: %v", err)
+	}
+	resp.Body.Close()
+	if !policyPayload.OK || policyPayload.Policy.IndexName != "test1" || policyPayload.Policy.RetentionDays != 30 {
+		t.Fatalf("unexpected retention policy payload: %#v", policyPayload)
+	}
+
+	if err := coordinator.runRetentionCleanup(context.Background(), time.Now().UTC()); err != nil {
+		t.Fatalf("runRetentionCleanup: %v", err)
+	}
+	if err := coordinator.loadRouting(context.Background()); err != nil {
+		t.Fatalf("coordinator reload routing after cleanup: %v", err)
+	}
+	if err := replica.loadIndexRetentionPolicies(context.Background()); err != nil {
+		t.Fatalf("replica loadIndexRetentionPolicies: %v", err)
+	}
+	if err := replica.loadRouting(context.Background()); err != nil {
+		t.Fatalf("replica reload routing after cleanup: %v", err)
+	}
+	if err := replica.cleanupExpiredLocalShardDays(time.Now().UTC()); err != nil {
+		t.Fatalf("replica cleanupExpiredLocalShardDays: %v", err)
+	}
+
+	if _, ok := coordinator.getRouting("test1", oldDay, shardID); ok {
+		t.Fatalf("expected expired route for %s to be removed", oldDay)
+	}
+	if _, ok := coordinator.getRouting("test1", freshDay, shardID); !ok {
+		t.Fatalf("expected fresh route for %s to remain", freshDay)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{name: "coordinator old", path: coordinator.shardDayPath("test1", oldDay), wantErr: true},
+		{name: "replica old", path: replica.shardDayPath("test1", oldDay), wantErr: true},
+		{name: "coordinator fresh", path: coordinator.shardDayPath("test1", freshDay), wantErr: false},
+		{name: "replica fresh", path: replica.shardDayPath("test1", freshDay), wantErr: false},
+	} {
+		_, err := os.Stat(tc.path)
+		if tc.wantErr {
+			if !os.IsNotExist(err) {
+				t.Fatalf("%s shard path should be removed, got err=%v", tc.name, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%s shard path should exist, got err=%v", tc.name, err)
+		}
+	}
+
+	resp, err = http.Get(coordinatorTS.URL + "/admin/index_retention?index=test1")
+	if err != nil {
+		t.Fatalf("GET /admin/index_retention failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body := readAllAndClose(t, resp)
+		t.Fatalf("expected retention GET status 200, got %d body=%q", resp.StatusCode, body)
+	}
+	var getPolicyPayload struct {
+		Policy IndexRetentionPolicy `json:"policy"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&getPolicyPayload); err != nil {
+		resp.Body.Close()
+		t.Fatalf("decode GET retention response: %v", err)
+	}
+	resp.Body.Close()
+	if getPolicyPayload.Policy.RetentionDays != 30 {
+		t.Fatalf("unexpected GET retention policy payload: %#v", getPolicyPayload)
+	}
+
+	resp, err = http.Get(coordinatorTS.URL + "/admin/indexes")
+	if err != nil {
+		t.Fatalf("GET /admin/indexes failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body := readAllAndClose(t, resp)
+		t.Fatalf("expected indexes status 200, got %d body=%q", resp.StatusCode, body)
+	}
+	var indexesPayload struct {
+		Indexes []struct {
+			Name          string   `json:"name"`
+			Days          []string `json:"days"`
+			RetentionDays int      `json:"retention_days"`
+		} `json:"indexes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&indexesPayload); err != nil {
+		resp.Body.Close()
+		t.Fatalf("decode indexes response: %v", err)
+	}
+	resp.Body.Close()
+	if len(indexesPayload.Indexes) != 1 {
+		t.Fatalf("expected exactly one index in payload, got %#v", indexesPayload.Indexes)
+	}
+	if indexesPayload.Indexes[0].Name != "test1" || indexesPayload.Indexes[0].RetentionDays != 30 {
+		t.Fatalf("unexpected indexes payload: %#v", indexesPayload.Indexes)
+	}
+	if len(indexesPayload.Indexes[0].Days) != 1 || indexesPayload.Indexes[0].Days[0] != freshDay {
+		t.Fatalf("expected only fresh day to remain, got %#v", indexesPayload.Indexes[0].Days)
+	}
+
+	req, err = http.NewRequest(http.MethodDelete, coordinatorTS.URL+"/admin/index_retention?index=test1", nil)
+	if err != nil {
+		t.Fatalf("build DELETE retention request: %v", err)
+	}
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE /admin/index_retention failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body := readAllAndClose(t, resp)
+		t.Fatalf("expected retention DELETE status 200, got %d body=%q", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+
+	if err := coordinator.loadIndexRetentionPolicies(context.Background()); err != nil {
+		t.Fatalf("coordinator reload retention policies: %v", err)
+	}
+	resp, err = http.Get(coordinatorTS.URL + "/admin/index_retention?index=test1")
+	if err != nil {
+		t.Fatalf("GET retention after delete failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		body := readAllAndClose(t, resp)
+		t.Fatalf("expected retention GET after delete status 404, got %d body=%q", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+}
+
 func TestAutoDrainResumeAndRun_WithEmbeddedEtcd(t *testing.T) {
 	cluster := startEmbeddedEtcd(t)
 	client := newEmbeddedEtcdClient(t, cluster.endpoint)
@@ -528,6 +755,9 @@ func mustRegisterAndLoadServerState(t *testing.T, s *Server) {
 	}
 	if err := s.loadRouting(context.Background()); err != nil {
 		t.Fatalf("loadRouting: %v", err)
+	}
+	if err := s.loadIndexRetentionPolicies(context.Background()); err != nil {
+		t.Fatalf("loadIndexRetentionPolicies: %v", err)
 	}
 	if err := s.loadReplicaRepairStates(context.Background()); err != nil {
 		t.Fatalf("loadReplicaRepairStates: %v", err)

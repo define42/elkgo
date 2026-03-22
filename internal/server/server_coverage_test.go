@@ -440,6 +440,12 @@ func TestShardSyncAndReplicaRepairHelpers(t *testing.T) {
 	target.syncAssignedShardsAsync(map[string]RoutingEntry{routeKey: oldRoute}, map[string]RoutingEntry{routeKey: asyncRoute})
 
 	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "async shard sync", func() (bool, error) {
+		target.shardSyncMu.Lock()
+		syncedVersion := target.shardSyncedVersion[routeKey]
+		target.shardSyncMu.Unlock()
+		if syncedVersion != asyncRoute.Version {
+			return false, nil
+		}
 		idx, err := target.openExistingShardIndex("events", daySync, shardSync)
 		if err != nil {
 			return false, nil

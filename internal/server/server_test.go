@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -1016,6 +1017,85 @@ func TestAutoResumableNodes_OnlyResumesAutoDrainsAfterOnlineGrace(t *testing.T) 
 	}
 }
 
+func TestIndexDayExpired_RetainsBoundaryDay(t *testing.T) {
+	now := time.Date(2026, 3, 22, 15, 30, 0, 0, time.UTC)
+
+	if indexDayExpired("2026-02-21", 30, now) {
+		t.Fatalf("expected cutoff day to be retained")
+	}
+	if !indexDayExpired("2026-02-20", 30, now) {
+		t.Fatalf("expected day before cutoff to expire")
+	}
+	if indexDayExpired("invalid-day", 30, now) {
+		t.Fatalf("expected invalid day to stay non-expired defensively")
+	}
+}
+
+func TestCleanupExpiredLocalShardDays_RemovesExpiredUnroutedDay(t *testing.T) {
+	s := New(Config{
+		Mode:              "both",
+		NodeID:            "n1",
+		Listen:            ":0",
+		DataDir:           t.TempDir(),
+		ReplicationFactor: 1,
+	})
+	defer s.Close()
+
+	now := time.Date(2026, 3, 22, 12, 0, 0, 0, time.UTC)
+	expiredDay := "2026-02-20"
+	retainedDay := "2026-02-21"
+
+	s.indexRetentionMu.Lock()
+	s.indexRetentionPolicies["test1"] = IndexRetentionPolicy{
+		IndexName:     "test1",
+		RetentionDays: 30,
+		UpdatedAt:     now.Format(time.RFC3339),
+	}
+	s.indexRetentionMu.Unlock()
+
+	setTestRoute(s, "test1", retainedDay, 0, []string{"n1"})
+
+	indexTestDocument(t, s, "test1", expiredDay, 0, "expired-doc", Document{
+		"id":        "expired-doc",
+		"timestamp": expiredDay + "T10:00:00Z",
+		"message":   "expired shard document",
+	})
+	indexTestDocument(t, s, "test1", retainedDay, 0, "retained-doc", Document{
+		"id":        "retained-doc",
+		"timestamp": retainedDay + "T10:00:00Z",
+		"message":   "retained shard document",
+	})
+
+	if _, err := os.Stat(s.shardDayPath("test1", expiredDay)); err != nil {
+		t.Fatalf("expected expired shard day path to exist before cleanup: %v", err)
+	}
+	if _, err := os.Stat(s.shardDayPath("test1", retainedDay)); err != nil {
+		t.Fatalf("expected retained shard day path to exist before cleanup: %v", err)
+	}
+
+	if err := s.cleanupExpiredLocalShardDays(now); err != nil {
+		t.Fatalf("cleanupExpiredLocalShardDays returned error: %v", err)
+	}
+
+	if _, err := os.Stat(s.shardDayPath("test1", expiredDay)); !os.IsNotExist(err) {
+		t.Fatalf("expected expired shard day path to be removed, got err=%v", err)
+	}
+	if _, err := os.Stat(s.shardDayPath("test1", retainedDay)); err != nil {
+		t.Fatalf("expected retained shard day path to remain, got err=%v", err)
+	}
+
+	s.mu.RLock()
+	_, expiredCached := s.indexes[partitionKey("test1", expiredDay, 0)]
+	_, retainedCached := s.indexes[partitionKey("test1", retainedDay, 0)]
+	s.mu.RUnlock()
+	if expiredCached {
+		t.Fatalf("expected expired shard cache entry to be removed")
+	}
+	if !retainedCached {
+		t.Fatalf("expected retained shard cache entry to remain")
+	}
+}
+
 func TestShouldRebalanceForMemberChange_IgnoresRemovalButHandlesAddition(t *testing.T) {
 	previous := map[string]NodeInfo{
 		"n1": {ID: "n1", Addr: "http://n1:8081"},
@@ -1081,6 +1161,60 @@ func TestHandleAvailableIndexes_ReturnsSortedIndexesAndDays(t *testing.T) {
 	}
 	if !reflect.DeepEqual(payload.Indexes[1].Days, []string{"2026-03-22"}) {
 		t.Fatalf("unexpected logs days: %#v", payload.Indexes[1].Days)
+	}
+}
+
+func TestHandleAvailableIndexes_IncludesRetentionPolicies(t *testing.T) {
+	s := New(Config{
+		Mode:              "both",
+		NodeID:            "n1",
+		Listen:            ":0",
+		DataDir:           t.TempDir(),
+		ReplicationFactor: 1,
+	})
+	defer s.Close()
+
+	setTestRoute(s, "test1", "2026-03-21", 0, []string{"n1"})
+	s.indexRetentionMu.Lock()
+	s.indexRetentionPolicies["test1"] = IndexRetentionPolicy{
+		IndexName:     "test1",
+		RetentionDays: 30,
+		UpdatedAt:     "2026-03-22T00:00:00Z",
+	}
+	s.indexRetentionPolicies["archive"] = IndexRetentionPolicy{
+		IndexName:     "archive",
+		RetentionDays: 7,
+		UpdatedAt:     "2026-03-22T00:00:00Z",
+	}
+	s.indexRetentionMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/indexes", nil)
+	rec := httptest.NewRecorder()
+	s.handleAvailableIndexes(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	var payload struct {
+		Indexes []struct {
+			Name          string   `json:"name"`
+			Days          []string `json:"days"`
+			RetentionDays int      `json:"retention_days"`
+		} `json:"indexes"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if len(payload.Indexes) != 2 {
+		t.Fatalf("expected 2 indexes, got %#v", payload.Indexes)
+	}
+	if payload.Indexes[0].Name != "archive" || payload.Indexes[0].RetentionDays != 7 || len(payload.Indexes[0].Days) != 0 {
+		t.Fatalf("unexpected archive entry: %#v", payload.Indexes[0])
+	}
+	if payload.Indexes[1].Name != "test1" || payload.Indexes[1].RetentionDays != 30 || !reflect.DeepEqual(payload.Indexes[1].Days, []string{"2026-03-21"}) {
+		t.Fatalf("unexpected test1 entry: %#v", payload.Indexes[1])
 	}
 }
 

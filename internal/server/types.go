@@ -55,6 +55,12 @@ type ReplicaRepairState struct {
 	MarkedAt  string `json:"marked_at"`
 }
 
+type IndexRetentionPolicy struct {
+	IndexName     string `json:"index_name"`
+	RetentionDays int    `json:"retention_days"`
+	UpdatedAt     string `json:"updated_at"`
+}
+
 type ShardHit struct {
 	Index  string   `json:"index"`
 	Day    string   `json:"day"`
@@ -170,6 +176,9 @@ type Server struct {
 	offlineMu     sync.RWMutex
 	offlineStates map[string]NodeOfflineState
 
+	indexRetentionMu       sync.RWMutex
+	indexRetentionPolicies map[string]IndexRetentionPolicy
+
 	replicaRepairMu     sync.RWMutex
 	replicaRepairStates map[string]ReplicaRepairState
 
@@ -183,10 +192,11 @@ type Server struct {
 	membersMu sync.RWMutex
 	members   map[string]NodeInfo
 
-	replicationFactor   int
-	routingPrefix       string
-	memberPrefix        string
-	drainPrefix         string
-	offlinePrefix       string
-	replicaRepairPrefix string
+	replicationFactor    int
+	routingPrefix        string
+	memberPrefix         string
+	drainPrefix          string
+	offlinePrefix        string
+	indexRetentionPrefix string
+	replicaRepairPrefix  string
 }

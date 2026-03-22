@@ -62,6 +62,9 @@ func TestHandleHealthAndStaticPages(t *testing.T) {
 		if tc.wantContains != "" && !strings.Contains(body, tc.wantContains) {
 			t.Fatalf("%s %s: expected body to contain %q, got %q", tc.method, tc.path, tc.wantContains, body)
 		}
+		if tc.path == "/cluster" && tc.method == http.MethodGet && !strings.Contains(body, "Index retention") {
+			t.Fatalf("%s %s: expected body to contain %q", tc.method, tc.path, "Index retention")
+		}
 	}
 
 	_ = s

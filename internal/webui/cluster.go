@@ -61,7 +61,7 @@ const ClusterPageHTML = `<!DOCTYPE html>
       align-items: start;
     }
 
-    .intro, .controls, .summary, .nodes, .routing {
+    .intro, .controls, .summary, .retention, .nodes, .routing {
       padding: 24px;
     }
 
@@ -175,7 +175,61 @@ const ClusterPageHTML = `<!DOCTYPE html>
     }
 
     .summary-grid {
-      grid-template-columns: repeat(5, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    }
+
+    .retention-layout {
+      display: grid;
+      gap: 18px;
+      grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+      align-items: start;
+    }
+
+    .retention-form {
+      display: grid;
+      gap: 14px;
+      padding: 20px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .retention-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .retention-actions button {
+      padding: 10px 14px;
+    }
+
+    .retention-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .retention-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 7px 11px;
+      border-radius: 999px;
+      border: 1px solid rgba(116, 217, 204, 0.18);
+      background: rgba(116, 217, 204, 0.08);
+      color: var(--text);
+      font-size: 0.86rem;
+    }
+
+    .retention-pill.warn {
+      border-color: rgba(248, 190, 116, 0.24);
+      background: rgba(248, 190, 116, 0.12);
+    }
+
+    .small-button {
+      padding: 8px 12px;
+      font-size: 0.9rem;
     }
 
     .metric {
@@ -368,7 +422,7 @@ const ClusterPageHTML = `<!DOCTYPE html>
     }
 
     @media (max-width: 980px) {
-      .hero, .summary-grid { grid-template-columns: 1fr; }
+      .hero, .summary-grid, .retention-layout { grid-template-columns: 1fr; }
       .span-6, .span-4, .span-3 { grid-column: span 12; }
     }
   </style>
@@ -421,6 +475,32 @@ const ClusterPageHTML = `<!DOCTYPE html>
       <div id="summary" class="summary-grid"></div>
     </section>
 
+    <section class="card retention">
+      <div class="section-title">Index retention</div>
+      <div class="retention-layout">
+        <form id="retention-form" class="retention-form">
+          <label>
+            <span>Index</span>
+            <input id="retention-index" list="retention-index-options" type="text" placeholder="events or test1" autocomplete="off">
+            <datalist id="retention-index-options"></datalist>
+          </label>
+          <label>
+            <span>Retention days</span>
+            <input id="retention-days" type="number" min="1" step="1" placeholder="30">
+          </label>
+          <div class="retention-actions">
+            <button id="retention-apply" class="primary" type="submit">Apply retention</button>
+            <button id="retention-clear" class="secondary" type="button">Clear policy</button>
+          </div>
+          <div class="hint">
+            Apply will create or update the policy for that index. Clear removes the policy entry.
+          </div>
+          <div id="retention-status" class="status" aria-live="polite"></div>
+        </form>
+        <div id="retention-list"></div>
+      </div>
+    </section>
+
     <section class="card nodes">
       <div class="section-title">Nodes</div>
       <div id="nodes" class="nodes-grid"></div>
@@ -441,6 +521,13 @@ const ClusterPageHTML = `<!DOCTYPE html>
     const autoRefreshEl = document.getElementById("auto-refresh");
     const indexFilterEl = document.getElementById("index-filter");
     const dayFilterEl = document.getElementById("day-filter");
+    const retentionListEl = document.getElementById("retention-list");
+    const retentionFormEl = document.getElementById("retention-form");
+    const retentionStatusEl = document.getElementById("retention-status");
+    const retentionIndexEl = document.getElementById("retention-index");
+    const retentionDaysEl = document.getElementById("retention-days");
+    const retentionClearEl = document.getElementById("retention-clear");
+    const retentionIndexOptionsEl = document.getElementById("retention-index-options");
 
     let rawData = null;
     let refreshTimer = null;
@@ -466,21 +553,33 @@ const ClusterPageHTML = `<!DOCTYPE html>
       });
     }
 
+    function indexEntries(data) {
+      return ((data && data.indexes) || []).slice().sort(function (a, b) {
+        return a.name.localeCompare(b.name);
+      });
+    }
+
     function refreshFilters(data) {
       const routes = routingArray(data);
       const currentIndex = indexFilterEl.value;
       const currentDay = dayFilterEl.value;
-      const indexes = Array.from(new Set(routes.map(function (route) { return route.index_name; }))).sort();
+      const knownIndexes = indexEntries(data).map(function (entry) { return entry.name; });
+      const indexes = Array.from(new Set(knownIndexes.concat(routes.map(function (route) { return route.index_name; })))).sort();
       const days = Array.from(new Set(routes.map(function (route) { return route.day; }))).sort();
 
       indexFilterEl.innerHTML = '<option value="">All indexes</option>';
       dayFilterEl.innerHTML = '<option value="">All days</option>';
+      retentionIndexOptionsEl.innerHTML = "";
 
       indexes.forEach(function (indexName) {
         const option = document.createElement("option");
         option.value = indexName;
         option.textContent = indexName;
         indexFilterEl.appendChild(option);
+
+        const retentionOption = document.createElement("option");
+        retentionOption.value = indexName;
+        retentionIndexOptionsEl.appendChild(retentionOption);
       });
 
       days.forEach(function (day) {
@@ -555,7 +654,7 @@ const ClusterPageHTML = `<!DOCTYPE html>
     function renderSummary(data) {
       const routes = filteredRoutes(data);
       const members = membersArray(data);
-      const indexes = new Set(routes.map(function (route) { return route.index_name; }));
+      const visibleIndexes = new Set(routes.map(function (route) { return route.index_name; }));
       const days = new Set(routes.map(function (route) { return route.day; }));
       const copies = routes.reduce(function (sum, route) {
         return sum + (Array.isArray(route.replicas) ? route.replicas.length : 0);
@@ -563,18 +662,66 @@ const ClusterPageHTML = `<!DOCTYPE html>
       const events = routes.reduce(function (sum, route) {
         return sum + Number(route.event_count || 0);
       }, 0);
+      const policies = indexEntries(data).filter(function (entry) { return Number(entry.retention_days || 0) > 0; }).length;
 
       const metrics = [
         { label: "Visible nodes", value: String(members.length) },
         { label: "Shard routes", value: String(routes.length) },
-        { label: "Indexes", value: String(indexes.size) },
+        { label: "Indexes", value: String(visibleIndexes.size) },
         { label: "Shard copies", value: String(copies) },
-        { label: "Events", value: String(events) }
+        { label: "Events", value: String(events) },
+        { label: "Retention policies", value: String(policies) }
       ];
 
       summaryEl.innerHTML = metrics.map(function (metric) {
         return '<div class="metric"><div class="muted">' + metric.label + '</div><strong>' + metric.value + '</strong></div>';
       }).join("");
+    }
+
+    function fillRetentionForm(indexName, retentionDays) {
+      retentionIndexEl.value = indexName || "";
+      retentionDaysEl.value = retentionDays ? String(retentionDays) : "";
+      if (indexName) retentionIndexEl.focus();
+    }
+
+    function renderRetention(data) {
+      const entries = indexEntries(data);
+      if (entries.length === 0) {
+        retentionListEl.innerHTML = '<div class="empty">No indexes or retention policies are available yet.</div>';
+        return;
+      }
+
+      const rows = entries.map(function (entry) {
+        const days = Array.isArray(entry.days) ? entry.days : [];
+        const retentionDays = Number(entry.retention_days || 0);
+        const daySummary = days.length === 0 ? "No routed days" : (days.length + " routed day" + (days.length === 1 ? "" : "s"));
+        const retentionLabel = retentionDays > 0 ? (retentionDays + " days") : "Not set";
+        const retentionClass = retentionDays > 0 ? "retention-pill" : "retention-pill warn";
+        const latestDay = days.length > 0 ? days[days.length - 1] : "";
+
+        return '' +
+          '<tr>' +
+            '<td><strong>' + entry.name + '</strong></td>' +
+            '<td>' + daySummary + (latestDay ? '<div class="muted">Latest: ' + latestDay + '</div>' : '') + '</td>' +
+            '<td><span class="' + retentionClass + '">' + retentionLabel + '</span></td>' +
+            '<td><button class="secondary small-button" type="button" data-edit-index="' + entry.name + '" data-edit-retention="' + retentionDays + '">Edit</button></td>' +
+          '</tr>';
+      }).join("");
+
+      retentionListEl.innerHTML = '' +
+        '<div class="table-wrap">' +
+          '<table>' +
+            '<thead>' +
+              '<tr>' +
+                '<th>Index</th>' +
+                '<th>Coverage</th>' +
+                '<th>Retention</th>' +
+                '<th>Action</th>' +
+              '</tr>' +
+            '</thead>' +
+            '<tbody>' + rows + '</tbody>' +
+          '</table>' +
+        '</div>';
     }
 
     function renderNodes(data) {
@@ -671,21 +818,36 @@ const ClusterPageHTML = `<!DOCTYPE html>
     function renderAll(data) {
       refreshFilters(data);
       renderSummary(data);
+      renderRetention(data);
       renderNodes(data);
       renderRouting(data);
+    }
+
+    async function readError(response) {
+      const text = await response.text();
+      return text || ("Request failed with status " + response.status);
     }
 
     async function loadClusterState() {
       setStatus("Loading cluster state...");
       try {
-        const response = await fetch("/admin/routing?stats=1", {
-          headers: { "Accept": "application/json" }
-        });
-        if (!response.ok) {
-          const message = await response.text();
-          throw new Error(message || ("Request failed with status " + response.status));
+        const responses = await Promise.all([
+          fetch("/admin/routing?stats=1", {
+            headers: { "Accept": "application/json" }
+          }),
+          fetch("/admin/indexes", {
+            headers: { "Accept": "application/json" }
+          })
+        ]);
+        if (!responses[0].ok) {
+          throw new Error(await readError(responses[0]));
         }
-        rawData = await response.json();
+        if (!responses[1].ok) {
+          throw new Error(await readError(responses[1]));
+        }
+        const routingData = await responses[0].json();
+        const indexData = await responses[1].json();
+        rawData = Object.assign({}, routingData, { indexes: Array.isArray(indexData.indexes) ? indexData.indexes : [] });
         renderAll(rawData);
         setStatus("Cluster state refreshed.");
       } catch (error) {
@@ -714,6 +876,66 @@ const ClusterPageHTML = `<!DOCTYPE html>
       }
     }
 
+    function setRetentionStatus(message, isError) {
+      retentionStatusEl.textContent = message || "";
+      retentionStatusEl.className = isError ? "status error" : "status";
+    }
+
+    async function applyIndexRetention(event) {
+      event.preventDefault();
+
+      const indexName = retentionIndexEl.value.trim();
+      const retentionDays = Number(retentionDaysEl.value);
+      if (!indexName) {
+        setRetentionStatus("Choose or enter an index name.", true);
+        return;
+      }
+      if (!Number.isInteger(retentionDays) || retentionDays <= 0) {
+        setRetentionStatus("Retention days must be a positive whole number.", true);
+        return;
+      }
+
+      setRetentionStatus("Saving retention for " + indexName + "...");
+      try {
+        const response = await fetch("/admin/index_retention?index=" + encodeURIComponent(indexName) + "&retention_days=" + encodeURIComponent(String(retentionDays)), {
+          method: "POST",
+          headers: { "Accept": "application/json" }
+        });
+        if (!response.ok) {
+          throw new Error(await readError(response));
+        }
+        await loadClusterState();
+        fillRetentionForm(indexName, retentionDays);
+        setRetentionStatus("Retention updated for " + indexName + ".");
+      } catch (error) {
+        setRetentionStatus(error.message || "Failed to update retention.", true);
+      }
+    }
+
+    async function clearIndexRetention() {
+      const indexName = retentionIndexEl.value.trim();
+      if (!indexName) {
+        setRetentionStatus("Enter an index name to clear.", true);
+        return;
+      }
+
+      setRetentionStatus("Clearing retention for " + indexName + "...");
+      try {
+        const response = await fetch("/admin/index_retention?index=" + encodeURIComponent(indexName), {
+          method: "DELETE",
+          headers: { "Accept": "application/json" }
+        });
+        if (!response.ok) {
+          throw new Error(await readError(response));
+        }
+        await loadClusterState();
+        fillRetentionForm(indexName, "");
+        setRetentionStatus("Retention cleared for " + indexName + ".");
+      } catch (error) {
+        setRetentionStatus(error.message || "Failed to clear retention.", true);
+      }
+    }
+
     function ensureRefreshLoop() {
       if (refreshTimer) {
         clearInterval(refreshTimer);
@@ -728,10 +950,20 @@ const ClusterPageHTML = `<!DOCTYPE html>
     autoRefreshEl.addEventListener("change", ensureRefreshLoop);
     indexFilterEl.addEventListener("change", function () { if (rawData) renderAll(rawData); });
     dayFilterEl.addEventListener("change", function () { if (rawData) renderAll(rawData); });
+    retentionFormEl.addEventListener("submit", applyIndexRetention);
+    retentionClearEl.addEventListener("click", clearIndexRetention);
     nodesEl.addEventListener("click", function (event) {
       const button = event.target.closest("button[data-node-id]");
       if (!button) return;
       updateNodeDrain(button.dataset.nodeId, button.dataset.drain === "1", button);
+    });
+    retentionListEl.addEventListener("click", function (event) {
+      const button = event.target.closest("button[data-edit-index]");
+      if (!button) return;
+      const indexName = button.dataset.editIndex || "";
+      const retentionDays = Number(button.dataset.editRetention || 0);
+      fillRetentionForm(indexName, retentionDays > 0 ? retentionDays : "");
+      setRetentionStatus("Editing retention for " + indexName + ".");
     });
 
     ensureRefreshLoop();

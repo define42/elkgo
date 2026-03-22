@@ -94,6 +94,7 @@ func (s *Server) handleAvailableIndexes(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	policies := s.snapshotIndexRetentionPolicies()
 	byIndex := map[string]map[string]struct{}{}
 	for _, route := range s.snapshotRouting() {
 		if _, ok := byIndex[route.IndexName]; !ok {
@@ -101,10 +102,16 @@ func (s *Server) handleAvailableIndexes(w http.ResponseWriter, r *http.Request) 
 		}
 		byIndex[route.IndexName][route.Day] = struct{}{}
 	}
+	for indexName := range policies {
+		if _, ok := byIndex[indexName]; !ok {
+			byIndex[indexName] = map[string]struct{}{}
+		}
+	}
 
 	type indexInfo struct {
-		Name string   `json:"name"`
-		Days []string `json:"days"`
+		Name          string   `json:"name"`
+		Days          []string `json:"days"`
+		RetentionDays int      `json:"retention_days,omitempty"`
 	}
 
 	indexes := make([]indexInfo, 0, len(byIndex))
@@ -114,11 +121,83 @@ func (s *Server) handleAvailableIndexes(w http.ResponseWriter, r *http.Request) 
 			days = append(days, day)
 		}
 		sort.Strings(days)
-		indexes = append(indexes, indexInfo{Name: name, Days: days})
+		info := indexInfo{Name: name, Days: days}
+		if policy, ok := policies[name]; ok {
+			info.RetentionDays = policy.RetentionDays
+		}
+		indexes = append(indexes, info)
 	}
 	sort.Slice(indexes, func(i, j int) bool { return indexes[i].Name < indexes[j].Name })
 
 	writeJSON(w, http.StatusOK, map[string]any{"indexes": indexes})
+}
+
+func (s *Server) handleIndexRetention(w http.ResponseWriter, r *http.Request) {
+	indexName := strings.TrimSpace(r.URL.Query().Get("index"))
+
+	switch r.Method {
+	case http.MethodGet:
+		if indexName != "" {
+			policy, ok := s.getIndexRetentionPolicy(indexName)
+			if !ok {
+				http.Error(w, "index retention policy not found", http.StatusNotFound)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"policy": policy})
+			return
+		}
+
+		policiesMap := s.snapshotIndexRetentionPolicies()
+		policies := make([]IndexRetentionPolicy, 0, len(policiesMap))
+		for _, policy := range policiesMap {
+			policies = append(policies, policy)
+		}
+		sort.Slice(policies, func(i, j int) bool { return policies[i].IndexName < policies[j].IndexName })
+		writeJSON(w, http.StatusOK, map[string]any{"policies": policies})
+		return
+	case http.MethodPost:
+		if !s.isCoordinatorMode() {
+			http.Error(w, "index retention requires coordinator or both mode", http.StatusForbidden)
+			return
+		}
+		if indexName == "" {
+			http.Error(w, "missing index", http.StatusBadRequest)
+			return
+		}
+
+		retentionDays, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("retention_days")))
+		if err != nil || retentionDays <= 0 {
+			http.Error(w, "missing or invalid retention_days", http.StatusBadRequest)
+			return
+		}
+
+		policy, err := s.setIndexRetentionPolicy(r.Context(), indexName, retentionDays)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.runRetentionCleanupAsync()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "policy": policy})
+		return
+	case http.MethodDelete:
+		if !s.isCoordinatorMode() {
+			http.Error(w, "index retention requires coordinator or both mode", http.StatusForbidden)
+			return
+		}
+		if indexName == "" {
+			http.Error(w, "missing index", http.StatusBadRequest)
+			return
+		}
+		if err := s.clearIndexRetentionPolicy(r.Context(), indexName); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "index": indexName})
+		return
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 }
 
 func (s *Server) handleNodeDrain(w http.ResponseWriter, r *http.Request) {

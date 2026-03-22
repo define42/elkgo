@@ -99,6 +99,10 @@ func (s *Server) shardIndexPath(indexName, day string, shardID int) string {
 	return filepath.Join(s.dataDir, s.nodeID, indexName, day, fmt.Sprintf("shard-%02d.bleve", shardID))
 }
 
+func (s *Server) shardDayPath(indexName, day string) string {
+	return filepath.Join(s.dataDir, s.nodeID, indexName, day)
+}
+
 func (s *Server) localShardExists(indexName, day string, shardID int) bool {
 	cacheKey := partitionKey(indexName, day, shardID)
 	s.mu.RLock()
@@ -153,6 +157,33 @@ func (s *Server) openShardIndexWithMode(indexName, day string, shardID int, crea
 	}
 	s.indexes[cacheKey] = idx
 	return idx, nil
+}
+
+func (s *Server) removeLocalShardDay(indexName, day string) error {
+	prefix := indexName + "|" + day + "|"
+
+	s.mu.Lock()
+	for key, idx := range s.indexes {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		_ = idx.Close()
+		delete(s.indexes, key)
+	}
+	s.mu.Unlock()
+
+	dayPath := s.shardDayPath(indexName, day)
+	if err := os.RemoveAll(dayPath); err != nil {
+		return err
+	}
+
+	indexPath := filepath.Dir(dayPath)
+	if entries, err := os.ReadDir(indexPath); err == nil && len(entries) == 0 {
+		if err := os.Remove(indexPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func buildIndexMapping() blevemapping.IndexMapping {

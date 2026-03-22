@@ -73,7 +73,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		"k":              k,
 		"hits":           allHits,
 		"partial_errors": partial,
-		"shards_per_day": enforcedShardsPerDay,
+		"shards_per_day": maxShardCountFromTargets(targets, s.defaultShardsPerDay),
 	})
 }
 

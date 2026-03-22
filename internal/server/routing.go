@@ -12,7 +12,7 @@ import (
 )
 
 func (s *Server) routeForDoc(indexName, day, docID string) (int, RoutingEntry, error) {
-	shardID := keyToShard(docID, enforcedShardsPerDay)
+	shardID := keyToShard(docID, s.shardCountForPartition(indexName, day))
 	rt, ok := s.getRouting(indexName, day, shardID)
 	if !ok {
 		return 0, RoutingEntry{}, fmt.Errorf("no routing for %s/%s shard %d", indexName, day, shardID)
@@ -32,6 +32,10 @@ func partitionKey(indexName, day string, shardID int) string {
 	return routingMapKey(indexName, day, shardID)
 }
 
+func partitionDayKey(indexName, day string) string {
+	return indexName + "|" + day
+}
+
 func (s *Server) getRouting(indexName, day string, shardID int) (RoutingEntry, bool) {
 	s.routingMu.RLock()
 	defer s.routingMu.RUnlock()
@@ -47,6 +51,50 @@ func (s *Server) snapshotRouting() map[string]RoutingEntry {
 		out[k] = v
 	}
 	return out
+}
+
+func (s *Server) shardCountForPartition(indexName, day string) int {
+	s.routingMu.RLock()
+	count := s.partitionShardCounts[partitionDayKey(indexName, day)]
+	s.routingMu.RUnlock()
+	if count > 0 {
+		return count
+	}
+	return normalizedDefaultShardsPerDay(s.defaultShardsPerDay)
+}
+
+func shardCountsFromRouting(routes map[string]RoutingEntry) map[string]int {
+	out := make(map[string]int)
+	for _, route := range routes {
+		key := partitionDayKey(route.IndexName, route.Day)
+		count := route.ShardID + 1
+		if count > out[key] {
+			out[key] = count
+		}
+	}
+	return out
+}
+
+func maxShardCountFromRouting(routes map[string]RoutingEntry, fallback int) int {
+	counts := shardCountsFromRouting(routes)
+	maxCount := fallback
+	for _, count := range counts {
+		if count > maxCount {
+			maxCount = count
+		}
+	}
+	return maxCount
+}
+
+func maxShardCountFromTargets(targets []RoutingEntry, fallback int) int {
+	maxCount := fallback
+	for _, target := range targets {
+		count := target.ShardID + 1
+		if count > maxCount {
+			maxCount = count
+		}
+	}
+	return maxCount
 }
 
 func (s *Server) snapshotMembers() map[string]NodeInfo {

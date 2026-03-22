@@ -36,6 +36,7 @@ func New(cfg Config) *Server {
 		shardSyncedVersion:     map[string]int64{},
 		etcdEndpoints:          append([]string(nil), cfg.ETCDEndpoints...),
 		routing:                map[string]RoutingEntry{},
+		partitionShardCounts:   map[string]int{},
 		members:                map[string]NodeInfo{},
 		drainStates:            map[string]NodeDrainState{},
 		offlineStates:          map[string]NodeOfflineState{},
@@ -44,6 +45,8 @@ func New(cfg Config) *Server {
 		replicaRepairRunning:   map[string]bool{},
 		replicaRepairRequests:  map[string]int64{},
 		replicationFactor:      cfg.ReplicationFactor,
+		defaultShardsPerDay:    normalizedDefaultShardsPerDay(cfg.DefaultShardsPerDay),
+		shardSyncConcurrency:   cfg.ShardSyncConcurrency,
 		routingPrefix:          "/distsearch/routing/",
 		memberPrefix:           "/distsearch/members/",
 		drainPrefix:            "/distsearch/drain/",
@@ -51,6 +54,13 @@ func New(cfg Config) *Server {
 		indexRetentionPrefix:   "/distsearch/index-retention/",
 		replicaRepairPrefix:    "/distsearch/replica-repair/",
 	}
+}
+
+func normalizedDefaultShardsPerDay(value int) int {
+	if value > 0 {
+		return value
+	}
+	return defaultShardsPerDay
 }
 
 func (s *Server) Run() error {
@@ -164,6 +174,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/internal/search_shard", s.handleSearchShard)
 	mux.HandleFunc("/internal/dump_docs", s.handleDumpDocs)
 	mux.HandleFunc("/internal/stream_docs", s.handleStreamDocs)
+	mux.HandleFunc("/internal/snapshot_shard", s.handleSnapshotShard)
 	mux.HandleFunc("/internal/shard_stats", s.handleShardStats)
 }
 

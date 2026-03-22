@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -36,6 +37,8 @@ func runContext(ctx context.Context, args []string) error {
 	var dataDir string
 	var etcdEndpointsRaw string
 	var replicationFactor int
+	var shardsPerDay int
+	var shardSyncConcurrency int
 
 	fs.StringVar(&mode, "mode", "both", "node|coordinator|both")
 	fs.StringVar(&nodeID, "node-id", "n1", "node id")
@@ -44,6 +47,8 @@ func runContext(ctx context.Context, args []string) error {
 	fs.StringVar(&dataDir, "data", "./data", "data directory")
 	fs.StringVar(&etcdEndpointsRaw, "etcd-endpoints", "http://127.0.0.1:2379", "comma-separated etcd endpoints")
 	fs.IntVar(&replicationFactor, "replication-factor", 3, "default replica count for bootstrap")
+	fs.IntVar(&shardsPerDay, "shards-per-day", defaultEnvInt("ELKGO_SHARDS_PER_DAY", 48), "default shard count for newly bootstrapped index/day partitions")
+	fs.IntVar(&shardSyncConcurrency, "shard-sync-concurrency", defaultEnvInt("ELKGO_SHARD_SYNC_CONCURRENCY", 0), "optional override for rebalance shard sync concurrency (0 = adaptive)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -54,13 +59,15 @@ func runContext(ctx context.Context, args []string) error {
 	}
 
 	s := server.New(server.Config{
-		Mode:              mode,
-		NodeID:            nodeID,
-		Listen:            listen,
-		PublicAddr:        publicAddr,
-		DataDir:           dataDir,
-		ETCDEndpoints:     endpoints,
-		ReplicationFactor: replicationFactor,
+		Mode:                 mode,
+		NodeID:               nodeID,
+		Listen:               listen,
+		PublicAddr:           publicAddr,
+		DataDir:              dataDir,
+		ETCDEndpoints:        endpoints,
+		ReplicationFactor:    replicationFactor,
+		DefaultShardsPerDay:  shardsPerDay,
+		ShardSyncConcurrency: shardSyncConcurrency,
 	})
 	done := make(chan struct{})
 	go func() {
@@ -93,4 +100,16 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func defaultEnvInt(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		return fallback
+	}
+	return value
 }

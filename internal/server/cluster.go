@@ -205,9 +205,11 @@ func (s *Server) loadRouting(ctx context.Context) error {
 		}
 		routing[routingMapKey(rt.IndexName, rt.Day, rt.ShardID)] = rt
 	}
+	partitionShardCounts := shardCountsFromRouting(routing)
 	s.routingMu.Lock()
 	oldRouting := s.routing
 	s.routing = routing
+	s.partitionShardCounts = partitionShardCounts
 	s.routingMu.Unlock()
 	s.clearReplicaCache()
 	s.syncAssignedShardsAsync(oldRouting, routing)
@@ -237,7 +239,7 @@ func (s *Server) watchRouting(ctx context.Context) {
 	}
 }
 
-func (s *Server) bootstrapRouting(ctx context.Context, indexName, day string, rf int) ([]RoutingEntry, error) {
+func (s *Server) bootstrapRouting(ctx context.Context, indexName, day string, rf int, shardsPerDay int) ([]RoutingEntry, error) {
 	members := s.snapshotMembers()
 	if len(members) == 0 {
 		return nil, errors.New("no members registered")
@@ -252,6 +254,9 @@ func (s *Server) bootstrapRouting(ctx context.Context, indexName, day string, rf
 	}
 	if rf > len(nodes) {
 		rf = len(nodes)
+	}
+	if shardsPerDay <= 0 {
+		shardsPerDay = s.defaultShardsPerDay
 	}
 
 	sess, err := concurrency.NewSession(s.etcd)
@@ -268,7 +273,7 @@ func (s *Server) bootstrapRouting(ctx context.Context, indexName, day string, rf
 	}
 	defer func() { _ = elect.Resign(context.Background()) }()
 
-	routes := generateRouting(nodes, enforcedShardsPerDay, rf)
+	routes := generateRouting(nodes, shardsPerDay, rf)
 	created := make([]RoutingEntry, 0, len(routes))
 	for shardID, replicas := range routes {
 		entry := RoutingEntry{

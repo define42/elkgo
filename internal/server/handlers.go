@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -69,6 +70,12 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 			rf = v
 		}
 	}
+	shardsPerDay := s.defaultShardsPerDay
+	if raw := r.URL.Query().Get("shards_per_day"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			shardsPerDay = v
+		}
+	}
 	members := s.snapshotMembers()
 	if len(members) == 0 {
 		http.Error(w, "no members registered", http.StatusBadRequest)
@@ -77,7 +84,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	if rf > len(members) {
 		rf = len(members)
 	}
-	created, err := s.bootstrapRouting(r.Context(), indexName, day, rf)
+	created, err := s.bootstrapRouting(r.Context(), indexName, day, rf, shardsPerDay)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if strings.Contains(err.Error(), "leadership") {
@@ -86,7 +93,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "index": indexName, "day": day, "shards_per_day": enforcedShardsPerDay, "replication_factor": rf, "routes": created})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "index": indexName, "day": day, "shards_per_day": shardsPerDay, "replication_factor": rf, "routes": created})
 }
 
 func (s *Server) handleAvailableIndexes(w http.ResponseWriter, r *http.Request) {
@@ -290,10 +297,10 @@ func (s *Server) handleRouting(w http.ResponseWriter, r *http.Request) {
 	}
 	routes := s.snapshotRouting()
 	if includeStats {
-		writeJSON(w, http.StatusOK, map[string]any{"routing": s.routingStatsMap(r.Context(), routes), "members": s.snapshotMembers(), "shards_per_day": enforcedShardsPerDay})
+		writeJSON(w, http.StatusOK, map[string]any{"routing": s.routingStatsMap(r.Context(), routes), "members": s.snapshotMembers(), "shards_per_day": maxShardCountFromRouting(routes, s.defaultShardsPerDay)})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"routing": routes, "members": s.snapshotMembers(), "shards_per_day": enforcedShardsPerDay})
+	writeJSON(w, http.StatusOK, map[string]any{"routing": routes, "members": s.snapshotMembers(), "shards_per_day": maxShardCountFromRouting(routes, s.defaultShardsPerDay)})
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -431,6 +438,64 @@ func (s *Server) handleStreamDocs(w http.ResponseWriter, r *http.Request) {
 	}
 	if flusher != nil {
 		flusher.Flush()
+	}
+}
+
+func (s *Server) handleSnapshotShard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	indexName := strings.TrimSpace(r.URL.Query().Get("index"))
+	day := strings.TrimSpace(r.URL.Query().Get("day"))
+	shardID, err := strconv.Atoi(r.URL.Query().Get("shard"))
+	if err != nil {
+		http.Error(w, "missing or invalid shard", http.StatusBadRequest)
+		return
+	}
+	if !s.ownsReplica(indexName, day, shardID) && !s.localShardExists(indexName, day, shardID) {
+		http.Error(w, "replica not assigned", http.StatusForbidden)
+		return
+	}
+
+	idx, err := s.openExistingShardIndex(indexName, day, shardID)
+	if err != nil {
+		if err == errShardIndexMissing {
+			http.Error(w, "shard not available", http.StatusServiceUnavailable)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	archiveFile, err := os.CreateTemp("", fmt.Sprintf("elkgo-shard-%02d-*.zip", shardID))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	archivePath := archiveFile.Name()
+	defer os.Remove(archivePath)
+	if err := archiveFile.Close(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := writeShardSnapshotArchive(idx, archivePath); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	archiveReader, err := os.Open(archivePath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer archiveReader.Close()
+
+	w.Header().Set("Content-Type", "application/zip")
+	if _, err := io.Copy(w, archiveReader); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 }
 

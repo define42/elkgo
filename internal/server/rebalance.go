@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -16,13 +17,14 @@ import (
 )
 
 const (
-	rebalanceElectionPath     = "/distsearch/admin/rebalance"
-	shardSyncConcurrency      = 4
-	shardSyncBatchSize        = 500
-	shardSyncTimeout          = 5 * time.Minute
-	offlineDrainGracePeriod   = 15 * time.Minute
-	onlineResumeGracePeriod   = 15 * time.Minute
-	offlineDrainCheckInterval = time.Minute
+	rebalanceElectionPath           = "/distsearch/admin/rebalance"
+	defaultShardSyncConcurrency     = 4
+	maxAdaptiveShardSyncConcurrency = 16
+	shardSyncBatchSize              = 500
+	shardSyncTimeout                = 5 * time.Minute
+	offlineDrainGracePeriod         = 15 * time.Minute
+	onlineResumeGracePeriod         = 15 * time.Minute
+	offlineDrainCheckInterval       = time.Minute
 )
 
 type shardSyncTask struct {
@@ -31,10 +33,11 @@ type shardSyncTask struct {
 }
 
 type routingGroup struct {
-	indexName string
-	day       string
-	rf        int
-	byShard   map[int]RoutingEntry
+	indexName    string
+	day          string
+	rf           int
+	shardsPerDay int
+	byShard      map[int]RoutingEntry
 }
 
 func (s *Server) maybeRebalanceRouting(ctx context.Context) {
@@ -261,9 +264,9 @@ func buildRoutingRebalanceUpdates(members map[string]NodeInfo, routes map[string
 	for _, groupKey := range groupKeys {
 		group := groups[groupKey]
 		nodes := routingCandidateNodes(members, group.rf)
-		desired := generateRouting(nodes, enforcedShardsPerDay, group.rf)
+		desired := generateRouting(nodes, group.shardsPerDay, group.rf)
 
-		for shardID := 0; shardID < enforcedShardsPerDay; shardID++ {
+		for shardID := 0; shardID < group.shardsPerDay; shardID++ {
 			desiredReplicas := desired[shardID]
 			current, ok := group.byShard[shardID]
 			if ok {
@@ -379,11 +382,14 @@ func groupRoutingByIndexDay(routes map[string]RoutingEntry) map[string]routingGr
 			group = routingGroup{
 				indexName: route.IndexName,
 				day:       route.Day,
-				byShard:   make(map[int]RoutingEntry, enforcedShardsPerDay),
+				byShard:   make(map[int]RoutingEntry),
 			}
 		}
 		if len(route.Replicas) > group.rf {
 			group.rf = len(route.Replicas)
+		}
+		if route.ShardID+1 > group.shardsPerDay {
+			group.shardsPerDay = route.ShardID + 1
 		}
 		group.byShard[route.ShardID] = route
 		groups[key] = group
@@ -446,7 +452,7 @@ func shardSyncTasksForNode(nodeID string, oldRouting, newRouting map[string]Rout
 }
 
 func (s *Server) syncAssignedShards(ctx context.Context, tasks []shardSyncTask) {
-	sem := make(chan struct{}, shardSyncConcurrency)
+	sem := make(chan struct{}, s.effectiveShardSyncConcurrency(len(tasks)))
 	var wg sync.WaitGroup
 
 	for _, task := range tasks {
@@ -472,6 +478,38 @@ func (s *Server) syncAssignedShards(ctx context.Context, tasks []shardSyncTask) 
 	}
 
 	wg.Wait()
+}
+
+func (s *Server) effectiveShardSyncConcurrency(taskCount int) int {
+	if taskCount <= 0 {
+		return 1
+	}
+	if s.shardSyncConcurrency > 0 {
+		if s.shardSyncConcurrency < taskCount {
+			return s.shardSyncConcurrency
+		}
+		return taskCount
+	}
+
+	concurrency := defaultShardSyncConcurrency
+	memberCount := len(s.snapshotMembers())
+	if memberCount > concurrency {
+		concurrency = memberCount
+	}
+	cpuCount := runtime.GOMAXPROCS(0)
+	if cpuCount > 0 && cpuCount < concurrency {
+		concurrency = cpuCount
+	}
+	if concurrency > maxAdaptiveShardSyncConcurrency {
+		concurrency = maxAdaptiveShardSyncConcurrency
+	}
+	if concurrency > taskCount {
+		concurrency = taskCount
+	}
+	if concurrency < 1 {
+		return 1
+	}
+	return concurrency
 }
 
 func (s *Server) claimShardSync(route RoutingEntry) bool {
@@ -506,6 +544,17 @@ func (s *Server) finishShardSync(route RoutingEntry, success bool) {
 func (s *Server) syncShardAssignment(ctx context.Context, task shardSyncTask) error {
 	if !s.ownsReplica(task.current.IndexName, task.current.Day, task.current.ShardID) {
 		return nil
+	}
+
+	if !s.localShardExists(task.current.IndexName, task.current.Day, task.current.ShardID) {
+		restored, sourceNodeID, err := s.restoreShardSnapshotFromCandidates(ctx, task)
+		if err == nil && restored {
+			log.Printf("shard snapshot restored for %s/%s shard %d from %s", task.current.IndexName, task.current.Day, task.current.ShardID, sourceNodeID)
+			return nil
+		}
+		if err != nil {
+			log.Printf("shard snapshot restore fallback for %s/%s shard %d: %v", task.current.IndexName, task.current.Day, task.current.ShardID, err)
+		}
 	}
 
 	restored, sourceNodeID, err := s.restoreShardDocumentsFromCandidates(ctx, task)

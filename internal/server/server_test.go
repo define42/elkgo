@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -664,13 +665,16 @@ func TestHandleIndex_PartialReplicaFailureSkipsStaleReplicaUntilRepair(t *testin
 	}
 }
 
-func TestSyncShardAssignment_StreamsDocsFromReplica(t *testing.T) {
+func TestSyncShardAssignment_PrefersSnapshotFromReplica(t *testing.T) {
 	target, targetTS := newNamedTestHTTPServer(t, "n1")
 
+	snapshotCalls := 0
 	streamCalls := 0
 	source, sourceTS := newWrappedTestHTTPServer(t, "n2", func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
+			case "/internal/snapshot_shard":
+				snapshotCalls++
 			case "/internal/stream_docs":
 				streamCalls++
 			case "/internal/dump_docs":
@@ -723,8 +727,11 @@ func TestSyncShardAssignment_StreamsDocsFromReplica(t *testing.T) {
 	if err := target.syncShardAssignment(context.Background(), task); err != nil {
 		t.Fatalf("sync shard assignment failed: %v", err)
 	}
-	if streamCalls == 0 {
-		t.Fatalf("expected shard sync to use streamed docs endpoint")
+	if snapshotCalls == 0 {
+		t.Fatalf("expected shard sync to use snapshot endpoint")
+	}
+	if streamCalls != 0 {
+		t.Fatalf("expected shard sync to avoid streamed docs when snapshot succeeds, got %d calls", streamCalls)
 	}
 
 	idx, err := target.openExistingShardIndex("events", day, shardID)
@@ -737,6 +744,151 @@ func TestSyncShardAssignment_StreamsDocsFromReplica(t *testing.T) {
 	}
 	if count != 2 {
 		t.Fatalf("expected 2 restored docs, got %d", count)
+	}
+}
+
+func TestSyncShardAssignment_FallsBackToStreamedDocsWhenSnapshotUnavailable(t *testing.T) {
+	target, targetTS := newNamedTestHTTPServer(t, "n1")
+
+	snapshotCalls := 0
+	streamCalls := 0
+	source, sourceTS := newWrappedTestHTTPServer(t, "n2", func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/internal/snapshot_shard":
+				snapshotCalls++
+				http.Error(w, "snapshot unavailable", http.StatusServiceUnavailable)
+				return
+			case "/internal/stream_docs":
+				streamCalls++
+			case "/internal/dump_docs":
+				t.Fatalf("unexpected legacy dump_docs path hit during shard sync fallback")
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	day := "2026-03-21"
+	shardID := 10
+	setTestRoute(target, "events", day, shardID, []string{"n1", "n2"})
+	setTestRoute(source, "events", day, shardID, []string{"n2"})
+
+	target.membersMu.Lock()
+	target.members = map[string]NodeInfo{
+		"n1": {ID: "n1", Addr: targetTS.URL},
+		"n2": {ID: "n2", Addr: sourceTS.URL},
+	}
+	target.membersMu.Unlock()
+
+	indexTestDocument(t, source, "events", day, shardID, "sync-c", Document{
+		"id":        "sync-c",
+		"timestamp": day + "T11:00:00Z",
+		"message":   "stream fallback doc",
+	})
+
+	task := shardSyncTask{
+		current: RoutingEntry{
+			IndexName: "events",
+			Day:       day,
+			ShardID:   shardID,
+			Replicas:  []string{"n1", "n2"},
+			Version:   2,
+		},
+		previous: RoutingEntry{
+			IndexName: "events",
+			Day:       day,
+			ShardID:   shardID,
+			Replicas:  []string{"n2"},
+			Version:   1,
+		},
+	}
+
+	if err := target.syncShardAssignment(context.Background(), task); err != nil {
+		t.Fatalf("sync shard assignment with snapshot fallback failed: %v", err)
+	}
+	if snapshotCalls == 0 {
+		t.Fatalf("expected shard sync to try snapshot endpoint before falling back")
+	}
+	if streamCalls == 0 {
+		t.Fatalf("expected shard sync to fall back to streamed docs")
+	}
+
+	idx, err := target.openExistingShardIndex("events", day, shardID)
+	if err != nil {
+		t.Fatalf("open fallback-restored shard: %v", err)
+	}
+	count, err := idx.DocCount()
+	if err != nil {
+		t.Fatalf("count fallback-restored docs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 restored doc after fallback, got %d", count)
+	}
+}
+
+func TestRouteForDoc_UsesPartitionSpecificShardCount(t *testing.T) {
+	s, _ := newTestHTTPServer(t)
+
+	day := "2026-03-21"
+	shardCount := 96
+	targetShard := 75
+	for shardID := 0; shardID < shardCount; shardID++ {
+		setTestRoute(s, "events", day, shardID, []string{"n1"})
+	}
+	setTestPartitionShardCount(s, "events", day, shardCount)
+
+	docID := findDocIDForShardCount(t, targetShard, shardCount, "wide-partition")
+	shardID, route, err := s.routeForDoc("events", day, docID)
+	if err != nil {
+		t.Fatalf("route for doc failed: %v", err)
+	}
+	if shardID != targetShard {
+		t.Fatalf("expected shard %d, got %d", targetShard, shardID)
+	}
+	if route.ShardID != targetShard {
+		t.Fatalf("expected route shard %d, got %d", targetShard, route.ShardID)
+	}
+	if got := s.shardCountForPartition("events", day); got != shardCount {
+		t.Fatalf("expected shard count %d, got %d", shardCount, got)
+	}
+}
+
+func TestEffectiveShardSyncConcurrency_AdaptiveAndOverride(t *testing.T) {
+	s, _ := newTestHTTPServer(t)
+
+	s.membersMu.Lock()
+	s.members = map[string]NodeInfo{
+		"n1": {ID: "n1"},
+		"n2": {ID: "n2"},
+		"n3": {ID: "n3"},
+		"n4": {ID: "n4"},
+		"n5": {ID: "n5"},
+		"n6": {ID: "n6"},
+	}
+	s.membersMu.Unlock()
+
+	expectedAdaptive := len(s.snapshotMembers())
+	if cpuCount := runtime.GOMAXPROCS(0); cpuCount > 0 && cpuCount < expectedAdaptive {
+		expectedAdaptive = cpuCount
+	}
+	if expectedAdaptive > maxAdaptiveShardSyncConcurrency {
+		expectedAdaptive = maxAdaptiveShardSyncConcurrency
+	}
+	if expectedAdaptive < 1 {
+		expectedAdaptive = 1
+	}
+
+	s.shardSyncConcurrency = 0
+	if got := s.effectiveShardSyncConcurrency(20); got != expectedAdaptive {
+		t.Fatalf("expected adaptive concurrency %d, got %d", expectedAdaptive, got)
+	}
+
+	s.shardSyncConcurrency = 3
+	if got := s.effectiveShardSyncConcurrency(20); got != 3 {
+		t.Fatalf("expected override concurrency 3, got %d", got)
+	}
+	if got := s.effectiveShardSyncConcurrency(2); got != 2 {
+		t.Fatalf("expected task-limited override concurrency 2, got %d", got)
 	}
 }
 
@@ -1461,6 +1613,12 @@ func setTestRoute(s *Server, indexName, day string, shardID int, replicas []stri
 	}
 }
 
+func setTestPartitionShardCount(s *Server, indexName, day string, shardCount int) {
+	s.routingMu.Lock()
+	defer s.routingMu.Unlock()
+	s.partitionShardCounts[partitionDayKey(indexName, day)] = shardCount
+}
+
 func indexTestDocument(t *testing.T, s *Server, indexName, day string, shardID int, docID string, doc Document) {
 	t.Helper()
 
@@ -1484,5 +1642,19 @@ func findDocIDForShard(t *testing.T, shardID int, prefix string) string {
 	}
 
 	t.Fatalf("could not find doc id for shard %d", shardID)
+	return ""
+}
+
+func findDocIDForShardCount(t *testing.T, shardID, shardCount int, prefix string) string {
+	t.Helper()
+
+	for i := 0; i < 100000; i++ {
+		candidate := fmt.Sprintf("%s-%d", prefix, i)
+		if keyToShard(candidate, shardCount) == shardID {
+			return candidate
+		}
+	}
+
+	t.Fatalf("could not find doc id for shard %d with shard count %d", shardID, shardCount)
 	return ""
 }

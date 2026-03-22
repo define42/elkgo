@@ -18,7 +18,10 @@ type NodeInfo struct {
 	DrainRequested bool   `json:"drain_requested"`
 }
 
-const enforcedShardsPerDay = 48
+const (
+	defaultShardsPerDay  = 48
+	enforcedShardsPerDay = defaultShardsPerDay
+)
 
 type RoutingEntry struct {
 	IndexName string   `json:"index_name"`
@@ -136,13 +139,15 @@ type RoutingEntryStats struct {
 }
 
 type Config struct {
-	Mode              string
-	NodeID            string
-	Listen            string
-	PublicAddr        string
-	DataDir           string
-	ETCDEndpoints     []string
-	ReplicationFactor int
+	Mode                 string
+	NodeID               string
+	Listen               string
+	PublicAddr           string
+	DataDir              string
+	ETCDEndpoints        []string
+	ReplicationFactor    int
+	DefaultShardsPerDay  int
+	ShardSyncConcurrency int
 }
 
 type Server struct {
@@ -193,13 +198,16 @@ type Server struct {
 	replicaRepairRunning  map[string]bool
 	replicaRepairRequests map[string]int64
 
-	routingMu sync.RWMutex
-	routing   map[string]RoutingEntry
+	routingMu            sync.RWMutex
+	routing              map[string]RoutingEntry
+	partitionShardCounts map[string]int
 
 	membersMu sync.RWMutex
 	members   map[string]NodeInfo
 
 	replicationFactor    int
+	defaultShardsPerDay  int
+	shardSyncConcurrency int
 	routingPrefix        string
 	memberPrefix         string
 	drainPrefix          string

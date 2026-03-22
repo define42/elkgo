@@ -8,95 +8,212 @@ const ClusterPageHTML = `<!DOCTYPE html>
   <title>elkgo cluster</title>
   <style>
     :root {
-      --bg: #081117;
-      --bg-soft: #0d1821;
-      --panel: rgba(10, 24, 32, 0.88);
-      --panel-strong: rgba(7, 18, 26, 0.96);
-      --line: rgba(116, 205, 196, 0.15);
-      --text: #eef8f6;
-      --muted: #a7c1bb;
-      --accent: #74d9cc;
-      --accent-2: #f8be74;
-      --good: #8df0b7;
-      --warn: #ffd485;
-      --shadow: 0 28px 80px rgba(0, 0, 0, 0.32);
-      --radius: 22px;
+      --bg: #1d1e24;
+      --surface: #25262d;
+      --surface-alt: #202126;
+      --panel: #1a1b20;
+      --panel-strong: #16171c;
+      --line: #343741;
+      --line-strong: #4a4d57;
+      --text: #dfe5ef;
+      --muted: #a6adbb;
+      --accent: #00bfb3;
+      --accent-strong: #3ea8cf;
+      --accent-soft: rgba(0, 191, 179, 0.16);
+      --danger: #f66f6f;
+      --danger-soft: rgba(246, 111, 111, 0.14);
+      --good: #5ad18a;
+      --good-soft: rgba(90, 209, 138, 0.16);
+      --warn: #d8b15c;
+      --warn-soft: rgba(216, 177, 92, 0.16);
+      --shadow: none;
+      --radius: 4px;
     }
 
-    * { box-sizing: border-box; }
+    * {
+      box-sizing: border-box;
+    }
 
     html, body {
       margin: 0;
       min-height: 100%;
+      background: var(--bg);
       color: var(--text);
-      font-family: "Avenir Next", "Segoe UI", "Trebuchet MS", sans-serif;
-      background:
-        radial-gradient(circle at top left, rgba(116, 217, 204, 0.16), transparent 28%),
-        radial-gradient(circle at top right, rgba(248, 190, 116, 0.13), transparent 22%),
-        linear-gradient(180deg, #071017 0%, #0a1620 48%, #081117 100%);
+      font-family: "IBM Plex Sans", "Segoe UI", "Trebuchet MS", sans-serif;
     }
 
-    body { padding: 28px 18px 48px; }
+    body {
+      padding: 0;
+    }
 
     .shell {
-      width: min(1280px, 100%);
-      margin: 0 auto;
+      width: 100%;
+      min-height: 100vh;
       display: grid;
+      gap: 0;
+      animation: rise 420ms ease-out both;
+    }
+
+    .menu {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      min-height: 52px;
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .menu-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .brand-badge {
+      width: 28px;
+      height: 28px;
+      border-radius: 5px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: #22c7bd;
+      color: #081015;
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      flex: 0 0 auto;
+    }
+
+    .brand-copy {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .menu-label {
+      color: var(--muted);
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      font-size: 0.68rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .menu-title {
+      font-size: 1rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .menu-links {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
       gap: 20px;
-      animation: rise 380ms ease-out both;
+    }
+
+    .menu-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 52px;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      color: var(--muted);
+      text-decoration: none;
+      font-weight: 600;
+      transition: color 160ms ease;
+    }
+
+    .menu-link:hover {
+      color: var(--text);
+    }
+
+    .menu-link.active {
+      color: var(--text);
+    }
+
+    .dashboard-shell {
+      display: grid;
+      gap: 16px;
+      padding: 16px;
+      background: var(--bg);
     }
 
     .card {
-      background: var(--panel);
+      background: var(--surface-alt);
       border: 1px solid var(--line);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
-      backdrop-filter: blur(12px);
     }
 
     .hero {
       display: grid;
-      grid-template-columns: 1.2fr 0.85fr;
-      gap: 20px;
+      grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
+      gap: 16px;
       align-items: start;
     }
 
     .intro, .controls, .summary, .retention, .nodes, .routing {
-      padding: 24px;
+      padding: 16px;
     }
 
     .eyebrow, .section-title {
       text-transform: uppercase;
       letter-spacing: 0.16em;
-      font-size: 12px;
+      font-size: 0.72rem;
+      font-weight: 700;
     }
 
-    .eyebrow { color: var(--accent); margin-bottom: 12px; }
-    .section-title { color: var(--accent-2); margin-bottom: 14px; }
+    .eyebrow {
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
 
-    h1, h2, h3 { margin: 0; }
-    h1 {
-      font-family: "Iowan Old Style", "Palatino Linotype", serif;
-      font-size: clamp(2.1rem, 5vw, 4rem);
-      line-height: 0.96;
+    .section-title {
+      color: var(--muted);
       margin-bottom: 12px;
+    }
+
+    h1, h2, h3 {
+      margin: 0;
+      color: var(--text);
+    }
+
+    h1 {
+      font-size: clamp(1.65rem, 2.7vw, 2.25rem);
+      line-height: 1.1;
+      margin-bottom: 10px;
     }
 
     p, .muted, .empty, .status, .hint, label, th, td {
       color: var(--muted);
     }
 
+    code {
+      color: var(--text);
+      font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+    }
+
     .intro p {
       margin: 0;
-      max-width: 60ch;
-      line-height: 1.65;
+      max-width: 62ch;
+      line-height: 1.6;
     }
 
     .nav {
       display: flex;
       gap: 10px;
       flex-wrap: wrap;
-      margin-top: 18px;
+      margin-top: 16px;
     }
 
     .nav a, button {
@@ -104,36 +221,43 @@ const ClusterPageHTML = `<!DOCTYPE html>
       align-items: center;
       justify-content: center;
       gap: 8px;
-      border-radius: 999px;
-      padding: 11px 16px;
+      min-height: 40px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius);
+      padding: 0 14px;
       text-decoration: none;
       font: inherit;
       cursor: pointer;
-      transition: transform 160ms ease, filter 160ms ease, border-color 160ms ease;
+      background: var(--panel);
+      color: var(--text);
+      transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
     }
 
     .nav a.primary, button.primary {
-      border: 0;
-      color: #042028;
+      border-color: var(--accent-strong);
+      color: #081015;
       font-weight: 700;
-      background: linear-gradient(135deg, var(--accent) 0%, #56c0df 100%);
-      box-shadow: 0 14px 34px rgba(86, 192, 223, 0.24);
+      background: var(--accent-strong);
     }
 
     .nav a.secondary, button.secondary {
-      border: 1px solid rgba(116, 217, 204, 0.22);
+      border: 1px solid var(--line-strong);
       color: var(--text);
       background: transparent;
     }
 
     .nav a:hover, button:hover {
-      transform: translateY(-1px);
-      filter: brightness(1.04);
+      border-color: var(--accent-strong);
+      background: var(--panel-strong);
+    }
+
+    .nav a.primary:hover, button.primary:hover {
+      background: #53b5da;
     }
 
     .controls-grid, .summary-grid, .nodes-grid {
       display: grid;
-      gap: 14px;
+      gap: 12px;
     }
 
     .controls-grid {
@@ -143,8 +267,13 @@ const ClusterPageHTML = `<!DOCTYPE html>
 
     label {
       display: grid;
-      gap: 8px;
-      font-size: 0.95rem;
+      gap: 6px;
+      font-size: 0.82rem;
+      color: var(--text);
+    }
+
+    label > span {
+      color: var(--muted);
     }
 
     .span-6 { grid-column: span 6; }
@@ -153,25 +282,38 @@ const ClusterPageHTML = `<!DOCTYPE html>
 
     input, select {
       width: 100%;
-      border: 1px solid rgba(116, 217, 204, 0.18);
-      border-radius: 14px;
-      padding: 13px 14px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius);
+      padding: 10px 12px;
       font: inherit;
       color: var(--text);
-      background: rgba(4, 15, 21, 0.76);
+      background: var(--panel);
+      transition: border-color 160ms ease, background 160ms ease;
     }
 
     input:focus, select:focus {
       outline: none;
-      border-color: var(--accent);
-      background: rgba(4, 18, 25, 0.96);
+      border-color: var(--accent-strong);
+      background: var(--panel-strong);
     }
 
     .toggle {
       display: flex;
       align-items: center;
       gap: 10px;
-      padding-bottom: 10px;
+      padding-bottom: 8px;
+      min-height: 40px;
+    }
+
+    .toggle input {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+      accent-color: var(--accent);
+    }
+
+    .toggle span {
+      color: var(--text);
     }
 
     .summary-grid {
@@ -180,18 +322,18 @@ const ClusterPageHTML = `<!DOCTYPE html>
 
     .retention-layout {
       display: grid;
-      gap: 18px;
+      gap: 16px;
       grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
       align-items: start;
     }
 
     .retention-form {
       display: grid;
-      gap: 14px;
-      padding: 20px;
-      border-radius: 18px;
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(255, 255, 255, 0.05);
+      gap: 12px;
+      padding: 16px;
+      border-radius: var(--radius);
+      background: var(--panel);
+      border: 1px solid var(--line);
     }
 
     .retention-actions {
@@ -214,49 +356,50 @@ const ClusterPageHTML = `<!DOCTYPE html>
     .retention-pill {
       display: inline-flex;
       align-items: center;
-      padding: 7px 11px;
+      padding: 6px 10px;
       border-radius: 999px;
-      border: 1px solid rgba(116, 217, 204, 0.18);
-      background: rgba(116, 217, 204, 0.08);
+      border: 1px solid rgba(0, 191, 179, 0.24);
+      background: var(--accent-soft);
       color: var(--text);
-      font-size: 0.86rem;
+      font-size: 0.82rem;
     }
 
     .retention-pill.warn {
-      border-color: rgba(248, 190, 116, 0.24);
-      background: rgba(248, 190, 116, 0.12);
+      border-color: rgba(216, 177, 92, 0.34);
+      background: var(--warn-soft);
     }
 
     .small-button {
-      padding: 8px 12px;
-      font-size: 0.9rem;
+      min-height: 32px;
+      padding: 0 10px;
+      font-size: 0.88rem;
     }
 
     .metric {
-      padding: 18px;
-      border-radius: 18px;
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(255, 255, 255, 0.05);
+      padding: 14px;
+      border-radius: var(--radius);
+      background: var(--panel);
+      border: 1px solid var(--line);
     }
 
     .metric strong {
       display: block;
-      font-size: 2rem;
+      font-size: 1.75rem;
       color: var(--text);
       margin-top: 8px;
     }
 
     .nodes-grid {
-      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
     }
 
     .node-card {
-      padding: 20px;
-      border-radius: 18px;
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(255, 255, 255, 0.05);
+      padding: 16px;
+      border-radius: var(--radius);
+      background: var(--panel);
+      border: 1px solid var(--line);
       display: grid;
-      gap: 14px;
+      gap: 12px;
     }
 
     .node-head {
@@ -270,26 +413,26 @@ const ClusterPageHTML = `<!DOCTYPE html>
       display: inline-flex;
       align-items: center;
       border-radius: 999px;
-      padding: 6px 10px;
-      font-size: 0.85rem;
-      border: 1px solid rgba(116, 217, 204, 0.18);
-      background: rgba(116, 217, 204, 0.08);
+      padding: 5px 10px;
+      font-size: 0.82rem;
+      border: 1px solid rgba(62, 168, 207, 0.28);
+      background: rgba(62, 168, 207, 0.12);
       color: var(--text);
     }
 
     .badge.draining-badge {
-      border-color: rgba(255, 212, 133, 0.28);
-      background: rgba(255, 212, 133, 0.14);
+      border-color: rgba(216, 177, 92, 0.34);
+      background: var(--warn-soft);
     }
 
     .badge.drained-badge {
-      border-color: rgba(141, 240, 183, 0.24);
-      background: rgba(141, 240, 183, 0.12);
+      border-color: rgba(90, 209, 138, 0.34);
+      background: var(--good-soft);
     }
 
     .badge.primary-badge {
-      border-color: rgba(248, 190, 116, 0.24);
-      background: rgba(248, 190, 116, 0.11);
+      border-color: rgba(62, 168, 207, 0.34);
+      background: rgba(62, 168, 207, 0.14);
     }
 
     .node-stats {
@@ -313,14 +456,14 @@ const ClusterPageHTML = `<!DOCTYPE html>
     .node-stat {
       flex: 1 1 90px;
       padding: 10px 12px;
-      border-radius: 14px;
-      background: rgba(1, 10, 15, 0.46);
-      border: 1px solid rgba(255, 255, 255, 0.04);
+      border-radius: var(--radius);
+      background: var(--panel-strong);
+      border: 1px solid var(--line);
     }
 
     .node-stat strong {
       display: block;
-      font-size: 1.15rem;
+      font-size: 1.05rem;
       color: var(--text);
       margin-top: 4px;
     }
@@ -332,19 +475,19 @@ const ClusterPageHTML = `<!DOCTYPE html>
     }
 
     .placement-pill {
-      padding: 7px 10px;
+      padding: 6px 9px;
       border-radius: 999px;
-      font-size: 0.84rem;
-      border: 1px solid rgba(255, 255, 255, 0.05);
-      background: rgba(255, 255, 255, 0.04);
+      font-size: 0.8rem;
+      border: 1px solid var(--line);
+      background: var(--panel-strong);
       color: var(--text);
     }
 
     .table-wrap {
       overflow: auto;
-      border-radius: 18px;
-      border: 1px solid rgba(255, 255, 255, 0.05);
-      background: rgba(1, 10, 15, 0.46);
+      border-radius: var(--radius);
+      border: 1px solid var(--line);
+      background: var(--panel);
     }
 
     table {
@@ -355,17 +498,18 @@ const ClusterPageHTML = `<!DOCTYPE html>
 
     th, td {
       text-align: left;
-      padding: 14px 16px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
       vertical-align: top;
+      font-size: 0.92rem;
     }
 
     th {
       position: sticky;
       top: 0;
-      background: rgba(7, 18, 26, 0.98);
+      background: var(--surface);
       color: var(--text);
-      font-size: 0.9rem;
+      font-size: 0.75rem;
       letter-spacing: 0.08em;
       text-transform: uppercase;
     }
@@ -377,37 +521,40 @@ const ClusterPageHTML = `<!DOCTYPE html>
     }
 
     .replica-pill {
-      padding: 6px 10px;
+      padding: 5px 9px;
       border-radius: 999px;
-      background: rgba(116, 217, 204, 0.08);
-      border: 1px solid rgba(116, 217, 204, 0.14);
+      background: var(--accent-soft);
+      border: 1px solid rgba(0, 191, 179, 0.24);
       color: var(--text);
-      font-size: 0.85rem;
+      font-size: 0.82rem;
     }
 
     .replica-pill.primary-badge {
-      background: rgba(248, 190, 116, 0.12);
-      border-color: rgba(248, 190, 116, 0.24);
+      background: rgba(62, 168, 207, 0.14);
+      border-color: rgba(62, 168, 207, 0.28);
     }
 
     .primary-node {
-      color: var(--good);
+      color: var(--text);
       font-weight: 700;
     }
 
     .status {
       min-height: 1.4em;
       margin-top: 10px;
+      font-size: 0.88rem;
     }
 
-    .status.error { color: #ffb19c; }
+    .status.error {
+      color: var(--danger);
+    }
 
     .empty {
-      padding: 26px;
+      padding: 24px;
       text-align: center;
-      border-radius: 18px;
-      border: 1px dashed rgba(116, 217, 204, 0.18);
-      background: rgba(255, 255, 255, 0.02);
+      border-radius: var(--radius);
+      border: 1px dashed var(--line-strong);
+      background: var(--panel);
     }
 
     @keyframes rise {
@@ -422,94 +569,131 @@ const ClusterPageHTML = `<!DOCTYPE html>
     }
 
     @media (max-width: 980px) {
-      .hero, .summary-grid, .retention-layout { grid-template-columns: 1fr; }
-      .span-6, .span-4, .span-3 { grid-column: span 12; }
+      .hero,
+      .retention-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .dashboard-shell {
+        padding: 12px;
+      }
+
+      .menu,
+      .menu-links {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .menu-link {
+        min-height: 40px;
+        justify-content: flex-start;
+      }
+
+      .span-6,
+      .span-4,
+      .span-3 {
+        grid-column: span 12;
+      }
     }
   </style>
 </head>
 <body>
   <main class="shell">
-    <section class="hero">
-      <article class="card intro">
-        <div class="eyebrow">Cluster dashboard</div>
-        <h1>See every node and every shard placement.</h1>
-        <p>
-          This view is meant to feel closer to a lightweight Cerebro-style routing console.
-          It shows registered nodes, routing coverage, primary ownership, and replica placement
-          using the live <code>/admin/routing</code> API.
-        </p>
-        <div class="nav">
-          <a class="primary" href="/">Search UI</a>
-          <a class="secondary" href="/admin/routing" target="_blank" rel="noreferrer">Routing JSON</a>
+    <header class="menu">
+      <div class="menu-brand">
+        <span class="brand-badge">C</span>
+        <div class="brand-copy">
+          <div class="menu-label">elkgo</div>
+          <div class="menu-title">Cluster dashboard</div>
         </div>
-      </article>
-      <section class="card controls">
-        <div class="section-title">Filters</div>
-        <div class="controls-grid">
-          <label class="span-6">
-            <span>Index</span>
-            <select id="index-filter">
-              <option value="">All indexes</option>
-            </select>
-          </label>
-          <label class="span-6">
-            <span>Day</span>
-            <select id="day-filter">
-              <option value="">All days</option>
-            </select>
-          </label>
-          <label class="span-3 toggle">
-            <input id="auto-refresh" type="checkbox" checked>
-            <span>Auto refresh</span>
-          </label>
-          <div class="span-3">
-            <button id="refresh-btn" class="primary" type="button">Refresh now</button>
-          </div>
-        </div>
-        <div id="status" class="status" aria-live="polite"></div>
-      </section>
-    </section>
-
-    <section class="card summary">
-      <div class="section-title">Cluster summary</div>
-      <div id="summary" class="summary-grid"></div>
-    </section>
-
-    <section class="card retention">
-      <div class="section-title">Index retention</div>
-      <div class="retention-layout">
-        <form id="retention-form" class="retention-form">
-          <label>
-            <span>Index</span>
-            <input id="retention-index" list="retention-index-options" type="text" placeholder="events or test1" autocomplete="off">
-            <datalist id="retention-index-options"></datalist>
-          </label>
-          <label>
-            <span>Retention days</span>
-            <input id="retention-days" type="number" min="1" step="1" placeholder="30">
-          </label>
-          <div class="retention-actions">
-            <button id="retention-apply" class="primary" type="submit">Apply retention</button>
-            <button id="retention-clear" class="secondary" type="button">Clear policy</button>
-          </div>
-          <div class="hint">
-            Apply will create or update the policy for that index. Clear removes the policy entry.
-          </div>
-          <div id="retention-status" class="status" aria-live="polite"></div>
-        </form>
-        <div id="retention-list"></div>
       </div>
-    </section>
+      <nav class="menu-links" aria-label="Primary">
+        <a class="menu-link" href="/">Search</a>
+        <a class="menu-link active" href="/cluster">Cluster dashboard</a>
+      </nav>
+    </header>
 
-    <section class="card nodes">
-      <div class="section-title">Nodes</div>
-      <div id="nodes" class="nodes-grid"></div>
-    </section>
+    <div class="dashboard-shell">
+      <section class="hero">
+        <article class="card intro">
+          <div class="eyebrow">Operations</div>
+          <h1>Cluster operations at a glance.</h1>
+          <p>
+            Review node membership, shard placement, drain state, and retention policies from the live
+            <code>/admin/routing</code> and <code>/admin/indexes</code> APIs.
+          </p>
+          <div class="nav">
+            <a class="secondary" href="/admin/routing" target="_blank" rel="noreferrer">Routing JSON</a>
+          </div>
+        </article>
+        <section class="card controls">
+          <div class="section-title">Filters</div>
+          <div class="controls-grid">
+            <label class="span-6">
+              <span>Index</span>
+              <select id="index-filter">
+                <option value="">All indexes</option>
+              </select>
+            </label>
+            <label class="span-6">
+              <span>Day</span>
+              <select id="day-filter">
+                <option value="">All days</option>
+              </select>
+            </label>
+            <label class="span-3 toggle">
+              <input id="auto-refresh" type="checkbox" checked>
+              <span>Auto refresh</span>
+            </label>
+            <div class="span-3">
+              <button id="refresh-btn" class="primary" type="button">Refresh now</button>
+            </div>
+          </div>
+          <div id="status" class="status" aria-live="polite"></div>
+        </section>
+      </section>
 
-    <section class="card routing">
-      <div class="section-title">Shard routing</div>
-      <div id="routing"></div>
-    </section>
+      <section class="card summary">
+        <div class="section-title">Cluster summary</div>
+        <div id="summary" class="summary-grid"></div>
+      </section>
+
+      <section class="card retention">
+        <div class="section-title">Index retention</div>
+        <div class="retention-layout">
+          <form id="retention-form" class="retention-form">
+            <label>
+              <span>Index</span>
+              <input id="retention-index" list="retention-index-options" type="text" placeholder="events or test1" autocomplete="off">
+              <datalist id="retention-index-options"></datalist>
+            </label>
+            <label>
+              <span>Retention days</span>
+              <input id="retention-days" type="number" min="1" step="1" placeholder="30">
+            </label>
+            <div class="retention-actions">
+              <button id="retention-apply" class="primary" type="submit">Apply retention</button>
+              <button id="retention-clear" class="secondary" type="button">Clear policy</button>
+            </div>
+            <div class="hint">
+              Apply will create or update the policy for that index. Clear removes the policy entry.
+            </div>
+            <div id="retention-status" class="status" aria-live="polite"></div>
+          </form>
+          <div id="retention-list"></div>
+        </div>
+      </section>
+
+      <section class="card nodes">
+        <div class="section-title">Nodes</div>
+        <div id="nodes" class="nodes-grid"></div>
+      </section>
+
+      <section class="card routing">
+        <div class="section-title">Shard routing</div>
+        <div id="routing"></div>
+      </section>
+    </div>
   </main>
 
   <script>

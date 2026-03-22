@@ -163,6 +163,8 @@ Watch for:
 - Search UI is in `internal/webui/home.go`.
 - Cluster dashboard is in `internal/webui/cluster.go`.
 - Keep UI changes aligned with server API behavior.
+- The search UI should lean toward a Kibana Discover style in dark mode: dense and app-like rather than marketing-like, with compact toolbars, a field/sidebar workflow, histogram-driven search context, and a tabular event stream.
+- Avoid drifting the search UI back toward oversized rounded-card layouts or explanatory hero copy when refining the main discover/search experience.
 - The cluster dashboard already exposes retention and index size; avoid drifting UI labels from backend field names.
 
 ## Local Development Commands

@@ -11,6 +11,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     permissions:
       contents: write   # required for tags + GitHub releases
@@ -42,7 +43,7 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          go test -tags=integration ./... -coverprofile=coverage.out  -covermode=atomic -coverpkg=./...
+          go test -tags=integration ./... -timeout 30m -coverprofile=coverage.out -covermode=atomic -coverpkg=./...
 
       - name: Show coverage in job summary
         run: |

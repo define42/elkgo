@@ -137,12 +137,10 @@ func zipDirectory(srcDir, archivePath string) error {
 	if err != nil {
 		return err
 	}
-	defer archiveFile.Close()
 
 	zipWriter := zip.NewWriter(archiveFile)
-	defer zipWriter.Close()
 
-	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+	walkErr := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -169,6 +167,16 @@ func zipDirectory(srcDir, archivePath string) error {
 		_, err = io.Copy(entryWriter, srcFile)
 		return err
 	})
+	if walkErr != nil {
+		_ = zipWriter.Close()
+		_ = archiveFile.Close()
+		return walkErr
+	}
+	if err := zipWriter.Close(); err != nil {
+		_ = archiveFile.Close()
+		return err
+	}
+	return archiveFile.Close()
 }
 
 func (s *Server) restoreShardSnapshotFromCandidates(ctx context.Context, task shardSyncTask) (bool, string, error) {
@@ -357,7 +365,7 @@ func (s *Server) transferShardSnapshotToReplica(ctx context.Context, route Routi
 	}
 	req.Header.Set("Content-Type", "application/zip")
 
-	resp, err := (&http.Client{Timeout: shardSyncTimeout}).Do(req)
+	resp, err := s.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -393,10 +401,11 @@ func downloadSnapshotArchive(ctx context.Context, client *http.Client, snapshotU
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-
-	_, err = io.Copy(file, resp.Body)
-	return err
+	if _, err := io.Copy(file, resp.Body); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 func extractSnapshotArchive(archivePath, destDir string) error {

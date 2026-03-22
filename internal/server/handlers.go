@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -628,7 +629,12 @@ func (s *Server) fetchShardStats(ctx context.Context, route RoutingEntry) (Shard
 		tried[replicaNodeID] = struct{}{}
 
 		var resp ShardStatsResponse
-		err = s.getJSON(ctx, addr+"/internal/shard_stats?index="+route.IndexName+"&day="+route.Day+"&shard="+strconv.Itoa(route.ShardID), &resp)
+		err = s.getJSON(ctx, fmt.Sprintf("%s/internal/shard_stats?index=%s&day=%s&shard=%d",
+			addr,
+			url.QueryEscape(route.IndexName),
+			url.QueryEscape(route.Day),
+			route.ShardID,
+		), &resp)
 		if err == nil {
 			return resp, nil
 		}

@@ -250,8 +250,8 @@ func readSourceRecord(file *os.File, pointer sourcePointer) ([]byte, error) {
 	if uint64(len(raw)) != rawLength {
 		return nil, fmt.Errorf("decoded raw length mismatch: got %d want %d", len(raw), rawLength)
 	}
-	if crc32.ChecksumIEEE(raw) != checksum {
-		return nil, fmt.Errorf("source checksum mismatch")
+	if got := crc32.ChecksumIEEE(raw); got != checksum {
+		return nil, fmt.Errorf("source checksum mismatch: got %08x want %08x", got, checksum)
 	}
 	return raw, nil
 }

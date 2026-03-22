@@ -68,6 +68,33 @@ func shardEventCount(idx bleve.Index) (uint64, error) {
 	return idx.DocCount()
 }
 
+func pathSizeBytes(path string) (uint64, error) {
+	var total uint64
+
+	err := filepath.Walk(path, func(walkPath string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info == nil || info.IsDir() {
+			return nil
+		}
+		total += uint64(info.Size())
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, errShardIndexMissing
+		}
+		return 0, err
+	}
+
+	return total, nil
+}
+
+func (s *Server) shardStorageSize(indexName, day string, shardID int) (uint64, error) {
+	return pathSizeBytes(s.shardIndexPath(indexName, day, shardID))
+}
+
 func docFromBleveFields(fields map[string]interface{}) Document {
 	doc := Document{}
 	for k, v := range fields {

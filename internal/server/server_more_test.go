@@ -65,6 +65,9 @@ func TestHandleHealthAndStaticPages(t *testing.T) {
 		if tc.path == "/cluster" && tc.method == http.MethodGet && !strings.Contains(body, "Index retention") {
 			t.Fatalf("%s %s: expected body to contain %q", tc.method, tc.path, "Index retention")
 		}
+		if tc.path == "/cluster" && tc.method == http.MethodGet && !strings.Contains(body, "<th>Size</th>") {
+			t.Fatalf("%s %s: expected body to contain %q", tc.method, tc.path, "<th>Size</th>")
+		}
 	}
 
 	_ = s
@@ -141,6 +144,9 @@ func TestHandleInternalIndexDumpAndStreamDocs(t *testing.T) {
 	resp.Body.Close()
 	if stats.EventCount != 1 {
 		t.Fatalf("expected event count 1, got %#v", stats)
+	}
+	if stats.SizeBytes == 0 {
+		t.Fatalf("expected shard size_bytes to be reported, got %#v", stats)
 	}
 }
 

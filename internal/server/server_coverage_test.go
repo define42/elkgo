@@ -277,9 +277,12 @@ func TestHandleRoutingAndFetchShardStats_CoversShardQueriesAndFailover(t *testin
 	if stats.EventCount != 1 {
 		t.Fatalf("expected shard event count 1, got %#v", stats)
 	}
+	if stats.SizeBytes == 0 {
+		t.Fatalf("expected shard size_bytes to be reported, got %#v", stats)
+	}
 
 	statsEntry := s.routingEntryStats(context.Background(), route)
-	if statsEntry.EventCount != 1 || statsEntry.CountError != "" {
+	if statsEntry.EventCount != 1 || statsEntry.SizeBytes == 0 || statsEntry.CountError != "" {
 		t.Fatalf("unexpected routingEntryStats payload: %#v", statsEntry)
 	}
 
@@ -321,7 +324,7 @@ func TestHandleRoutingAndFetchShardStats_CoversShardQueriesAndFailover(t *testin
 		t.Fatalf("decode routing stats response: %v", err)
 	}
 	resp.Body.Close()
-	if routingStats.EventCount != 1 || routingStats.ShardID != shardID {
+	if routingStats.EventCount != 1 || routingStats.SizeBytes == 0 || routingStats.ShardID != shardID {
 		t.Fatalf("unexpected routing stats response: %#v", routingStats)
 	}
 
@@ -348,6 +351,9 @@ func TestHandleRoutingAndFetchShardStats_CoversShardQueriesAndFailover(t *testin
 	}
 	if routingStatsMapResp.Routing[routeKey].EventCount != 1 {
 		t.Fatalf("unexpected routing map stats payload: %#v", routingStatsMapResp.Routing)
+	}
+	if routingStatsMapResp.Routing[routeKey].SizeBytes == 0 {
+		t.Fatalf("expected routing map size_bytes to be reported, got %#v", routingStatsMapResp.Routing[routeKey])
 	}
 	if len(routingStatsMapResp.Members) < 3 {
 		t.Fatalf("expected members in routing stats response, got %#v", routingStatsMapResp.Members)

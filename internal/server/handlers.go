@@ -464,11 +464,21 @@ func (s *Server) handleShardStats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	sizeBytes, err := s.shardStorageSize(indexName, day, shardID)
+	if err != nil {
+		if err == errShardIndexMissing {
+			http.Error(w, "shard not available", http.StatusServiceUnavailable)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, http.StatusOK, ShardStatsResponse{
 		IndexName:  indexName,
 		Day:        day,
 		ShardID:    shardID,
 		EventCount: count,
+		SizeBytes:  sizeBytes,
 	})
 }
 
@@ -488,6 +498,7 @@ func (s *Server) routingEntryStats(ctx context.Context, route RoutingEntry) Rout
 		return out
 	}
 	out.EventCount = resp.EventCount
+	out.SizeBytes = resp.SizeBytes
 	return out
 }
 

@@ -678,6 +678,35 @@ const ClusterPageHTML = `<!DOCTYPE html>
       }).join("");
     }
 
+    function formatBytes(sizeBytes) {
+      const size = Number(sizeBytes || 0);
+      if (!Number.isFinite(size) || size <= 0) return "0 B";
+
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      let value = size;
+      let unitIndex = 0;
+      while (value >= 1024 && unitIndex < units.length - 1) {
+        value /= 1024;
+        unitIndex += 1;
+      }
+      const digits = value >= 100 || unitIndex === 0 ? 0 : value >= 10 ? 1 : 2;
+      return value.toFixed(digits) + " " + units[unitIndex];
+    }
+
+    function indexRouteStats(data) {
+      const stats = {};
+      routingArray(data).forEach(function (route) {
+        const key = route.index_name;
+        if (!stats[key]) {
+          stats[key] = { sizeBytes: 0, eventCount: 0, partial: false };
+        }
+        stats[key].sizeBytes += Number(route.size_bytes || 0);
+        stats[key].eventCount += Number(route.event_count || 0);
+        if (route.count_error) stats[key].partial = true;
+      });
+      return stats;
+    }
+
     function fillRetentionForm(indexName, retentionDays) {
       retentionIndexEl.value = indexName || "";
       retentionDaysEl.value = retentionDays ? String(retentionDays) : "";
@@ -686,6 +715,7 @@ const ClusterPageHTML = `<!DOCTYPE html>
 
     function renderRetention(data) {
       const entries = indexEntries(data);
+      const routeStats = indexRouteStats(data);
       if (entries.length === 0) {
         retentionListEl.innerHTML = '<div class="empty">No indexes or retention policies are available yet.</div>';
         return;
@@ -694,15 +724,19 @@ const ClusterPageHTML = `<!DOCTYPE html>
       const rows = entries.map(function (entry) {
         const days = Array.isArray(entry.days) ? entry.days : [];
         const retentionDays = Number(entry.retention_days || 0);
+        const stats = routeStats[entry.name] || { sizeBytes: 0, eventCount: 0, partial: false };
         const daySummary = days.length === 0 ? "No routed days" : (days.length + " routed day" + (days.length === 1 ? "" : "s"));
         const retentionLabel = retentionDays > 0 ? (retentionDays + " days") : "Not set";
         const retentionClass = retentionDays > 0 ? "retention-pill" : "retention-pill warn";
         const latestDay = days.length > 0 ? days[days.length - 1] : "";
+        const sizeSummary = formatBytes(stats.sizeBytes);
+        const sizeDetail = stats.partial ? '<div class="muted">Partial from available shards</div>' : '<div class="muted">' + stats.eventCount + ' events</div>';
 
         return '' +
           '<tr>' +
             '<td><strong>' + entry.name + '</strong></td>' +
             '<td>' + daySummary + (latestDay ? '<div class="muted">Latest: ' + latestDay + '</div>' : '') + '</td>' +
+            '<td><strong>' + sizeSummary + '</strong>' + sizeDetail + '</td>' +
             '<td><span class="' + retentionClass + '">' + retentionLabel + '</span></td>' +
             '<td><button class="secondary small-button" type="button" data-edit-index="' + entry.name + '" data-edit-retention="' + retentionDays + '">Edit</button></td>' +
           '</tr>';
@@ -715,6 +749,7 @@ const ClusterPageHTML = `<!DOCTYPE html>
               '<tr>' +
                 '<th>Index</th>' +
                 '<th>Coverage</th>' +
+                '<th>Size</th>' +
                 '<th>Retention</th>' +
                 '<th>Action</th>' +
               '</tr>' +

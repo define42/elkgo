@@ -1262,6 +1262,9 @@ func TestHandleRouting_WithStatsIncludesShardEventCounts(t *testing.T) {
 	if route.EventCount != 2 {
 		t.Fatalf("expected event_count=2, got %d", route.EventCount)
 	}
+	if route.SizeBytes == 0 {
+		t.Fatalf("expected size_bytes to be reported, got %#v", route)
+	}
 	if route.CountError != "" {
 		t.Fatalf("expected no count error, got %q", route.CountError)
 	}

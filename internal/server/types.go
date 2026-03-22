@@ -125,11 +125,13 @@ type ShardStatsResponse struct {
 	Day        string `json:"day"`
 	ShardID    int    `json:"shard_id"`
 	EventCount uint64 `json:"event_count"`
+	SizeBytes  uint64 `json:"size_bytes"`
 }
 
 type RoutingEntryStats struct {
 	RoutingEntry
 	EventCount uint64 `json:"event_count"`
+	SizeBytes  uint64 `json:"size_bytes"`
 	CountError string `json:"count_error,omitempty"`
 }
 

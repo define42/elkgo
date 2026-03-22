@@ -288,6 +288,17 @@ const HomePageHTML = `<!DOCTYPE html>
       background: #63b5d7;
     }
 
+    button:disabled,
+    .actions a[aria-disabled="true"] {
+      opacity: 0.42;
+      cursor: not-allowed;
+    }
+
+    button:disabled:hover,
+    .actions a[aria-disabled="true"]:hover {
+      background: inherit;
+    }
+
     button.secondary, .actions a {
       background: transparent;
       color: var(--text);
@@ -505,6 +516,20 @@ const HomePageHTML = `<!DOCTYPE html>
     .events-meta {
       color: var(--muted);
       font-size: 0.82rem;
+    }
+
+    .events-head-right,
+    .pager {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .pager button {
+      padding: 7px 12px;
+      min-width: 68px;
     }
 
     .timeline-chart {
@@ -882,6 +907,11 @@ const HomePageHTML = `<!DOCTYPE html>
         gap: 6px;
       }
 
+      .events-head-right,
+      .pager {
+        justify-content: space-between;
+      }
+
       .events-header,
       .event-summary-row {
         min-width: 0;
@@ -935,7 +965,7 @@ const HomePageHTML = `<!DOCTYPE html>
           </label>
           <label class="span-2">
             <span>Top K</span>
-            <input id="k" name="k" class="input-compact" type="number" min="1" max="1000" value="10">
+            <input id="k" name="k" class="input-compact" type="number" min="1" max="1000" value="100">
           </label>
           <label class="span-3">
             <span>Day From</span>
@@ -969,10 +999,12 @@ const HomePageHTML = `<!DOCTYPE html>
     const summaryEl = document.getElementById("summary");
     const resetBtn = document.getElementById("reset-btn");
     const indexCatalogEl = document.getElementById("index-catalog");
+    const DEFAULT_TOP_K = "100";
     let availableIndexes = [];
     let pendingIndexValue = "";
     let selectedFields = [];
     let currentResultData = null;
+    let currentOffset = 0;
 
     const fields = {
       index: document.getElementById("index"),
@@ -1561,7 +1593,54 @@ const HomePageHTML = `<!DOCTYPE html>
 
       const head = document.createElement("div");
       head.className = "events-head";
-      head.innerHTML = '<div class="events-title">Event Stream</div><div class="events-meta">' + hits.length + ' visible hit' + (hits.length === 1 ? '' : 's') + '</div>';
+      const headLeft = document.createElement("div");
+      const title = document.createElement("div");
+      title.className = "events-title";
+      title.textContent = "Event Stream";
+      headLeft.appendChild(title);
+
+      const meta = document.createElement("div");
+      meta.className = "events-meta";
+      meta.textContent = hits.length + " visible hit" + (hits.length === 1 ? "" : "s");
+      headLeft.appendChild(meta);
+      head.appendChild(headLeft);
+
+      const headRight = document.createElement("div");
+      headRight.className = "events-head-right";
+      const from = currentResultData && typeof currentResultData.from === "number" ? currentResultData.from : 0;
+
+      const range = document.createElement("div");
+      range.className = "events-meta";
+      range.textContent = (from + 1) + "-" + (from + hits.length);
+      headRight.appendChild(range);
+
+      const pager = document.createElement("div");
+      pager.className = "pager";
+
+      const prevBtn = document.createElement("button");
+      prevBtn.type = "button";
+      prevBtn.className = "secondary";
+      prevBtn.textContent = "Prev";
+      prevBtn.disabled = from <= 0;
+      prevBtn.addEventListener("click", function () {
+        currentOffset = Math.max(0, from - (currentResultData && currentResultData.k ? currentResultData.k : Number(DEFAULT_TOP_K)));
+        runSearch(true);
+      });
+      pager.appendChild(prevBtn);
+
+      const nextBtn = document.createElement("button");
+      nextBtn.type = "button";
+      nextBtn.className = "secondary";
+      nextBtn.textContent = "Next";
+      nextBtn.disabled = !(currentResultData && currentResultData.has_more);
+      nextBtn.addEventListener("click", function () {
+        currentOffset = from + (currentResultData && currentResultData.k ? currentResultData.k : Number(DEFAULT_TOP_K));
+        runSearch(true);
+      });
+      pager.appendChild(nextBtn);
+
+      headRight.appendChild(pager);
+      head.appendChild(headRight);
       panel.appendChild(head);
 
       const table = document.createElement("div");
@@ -1717,6 +1796,7 @@ const HomePageHTML = `<!DOCTYPE html>
     function renderResults(data) {
       resultsEl.innerHTML = "";
       currentResultData = data;
+      currentOffset = data && typeof data.from === "number" ? data.from : 0;
       const hits = Array.isArray(data.hits) ? data.hits : [];
       if (hits.length === 0) {
         setHitCount("0 hits");
@@ -1747,18 +1827,24 @@ const HomePageHTML = `<!DOCTYPE html>
           : fields[key].value.trim();
         if (value !== "") params.set(key, value);
       });
+      if (currentOffset > 0) {
+        params.set("from", String(currentOffset));
+      }
       return params;
     }
 
     function applyParams(params) {
       Object.keys(fields).forEach(function (key) {
-        const value = params.get(key) || (key === "k" ? "10" : "");
+        const value = params.get(key) || (key === "k" ? DEFAULT_TOP_K : "");
         if (key === "index") {
           pendingIndexValue = value;
           return;
         }
         fields[key].value = value;
       });
+      const rawFrom = params.get("from");
+      const parsedFrom = rawFrom ? Number(rawFrom) : 0;
+      currentOffset = Number.isFinite(parsedFrom) && parsedFrom > 0 ? Math.floor(parsedFrom) : 0;
     }
 
     function applySuggestedDay() {
@@ -1887,13 +1973,15 @@ const HomePageHTML = `<!DOCTYPE html>
 
     form.addEventListener("submit", function (event) {
       event.preventDefault();
+      currentOffset = 0;
       runSearch(true);
     });
 
     resetBtn.addEventListener("click", function () {
       Object.keys(fields).forEach(function (key) {
-        fields[key].value = key === "k" ? "10" : "";
+        fields[key].value = key === "k" ? DEFAULT_TOP_K : "";
       });
+      currentOffset = 0;
       summaryEl.innerHTML = "";
       errorsEl.innerHTML = "";
       resultsEl.innerHTML = "";

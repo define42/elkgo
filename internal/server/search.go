@@ -20,6 +20,7 @@ import (
 const (
 	defaultSearchShardConcurrency = 32
 	maxSearchShardConcurrency     = 128
+	maxSearchOffset               = 10000
 )
 
 type searchHitRef struct {
@@ -70,6 +71,15 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			k = parsed
 		}
 	}
+	from := 0
+	if raw := r.URL.Query().Get("from"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 || parsed > maxSearchOffset {
+			http.Error(w, fmt.Sprintf("invalid from (must be between 0 and %d)", maxSearchOffset), http.StatusBadRequest)
+			return
+		}
+		from = parsed
+	}
 	days, err := resolveSearchDays(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -81,7 +91,17 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	refs, partial := s.collectTopSearchRefs(r.Context(), targets, q, k)
+	refs, partial := s.collectTopSearchRefs(r.Context(), targets, q, from+k+1)
+	hasMore := len(refs) > from+k
+	pageEnd := from + k
+	if from >= len(refs) {
+		refs = nil
+	} else {
+		if pageEnd > len(refs) {
+			pageEnd = len(refs)
+		}
+		refs = refs[from:pageEnd]
+	}
 	hits, fetchErrors := s.fetchSearchHits(r.Context(), refs)
 	partial = append(partial, fetchErrors...)
 
@@ -91,6 +111,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		"days":           days,
 		"query":          q,
 		"k":              k,
+		"from":           from,
+		"has_more":       hasMore,
 		"hits":           hits,
 		"partial_errors": partial,
 		"shards_per_day": maxShardCountFromTargets(targets, s.defaultShardsPerDay),

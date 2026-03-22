@@ -168,6 +168,75 @@ func TestHandleSearch_AllIndexesScope(t *testing.T) {
 	}
 }
 
+func TestHandleSearch_FromPagination(t *testing.T) {
+	s, ts := newTestHTTPServer(t)
+
+	day := "2026-03-21"
+	setTestRoute(s, "events", day, 0, []string{"n1"})
+
+	for i := 1; i <= 5; i++ {
+		docID := fmt.Sprintf("doc-%03d", i)
+		indexTestDocument(t, s, "events", day, 0, docID, Document{
+			"id":        docID,
+			"timestamp": fmt.Sprintf("%sT10:%02d:00Z", day, i),
+			"message":   "paged event",
+		})
+	}
+
+	checkPage := func(from, k int, wantIDs []string, wantHasMore bool) {
+		t.Helper()
+
+		searchURL := fmt.Sprintf("%s/search?index=events&day_from=%s&day_to=%s&k=%d&from=%d",
+			ts.URL,
+			url.QueryEscape(day),
+			url.QueryEscape(day),
+			k,
+			from,
+		)
+		resp, err := http.Get(searchURL)
+		if err != nil {
+			t.Fatalf("search request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		}
+
+		var payload struct {
+			K       int        `json:"k"`
+			From    int        `json:"from"`
+			HasMore bool       `json:"has_more"`
+			Hits    []ShardHit `json:"hits"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode pagination response: %v", err)
+		}
+
+		if payload.K != k {
+			t.Fatalf("expected k=%d, got %d", k, payload.K)
+		}
+		if payload.From != from {
+			t.Fatalf("expected from=%d, got %d", from, payload.From)
+		}
+		if payload.HasMore != wantHasMore {
+			t.Fatalf("expected has_more=%t, got %t", wantHasMore, payload.HasMore)
+		}
+
+		gotIDs := make([]string, 0, len(payload.Hits))
+		for _, hit := range payload.Hits {
+			gotIDs = append(gotIDs, hit.DocID)
+		}
+		if !reflect.DeepEqual(gotIDs, wantIDs) {
+			t.Fatalf("unexpected page doc ids: got=%#v want=%#v", gotIDs, wantIDs)
+		}
+	}
+
+	checkPage(0, 2, []string{"doc-001", "doc-002"}, true)
+	checkPage(2, 2, []string{"doc-003", "doc-004"}, true)
+	checkPage(4, 2, []string{"doc-005"}, false)
+}
+
 func TestHandleBulkIngest_NDJSONIndexesDocuments(t *testing.T) {
 	s, ts := newTestHTTPServer(t)
 

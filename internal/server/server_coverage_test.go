@@ -945,9 +945,8 @@ func TestRequestBodyReader_NonGzipEncodings(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encoding %q: unexpected error: %v", encoding, err)
 		}
-		defer reader.Close()
-		// Should return the raw body unchanged.
 		body, err := io.ReadAll(reader)
+		reader.Close()
 		if err != nil {
 			t.Fatalf("encoding %q: read error: %v", encoding, err)
 		}

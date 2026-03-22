@@ -22,6 +22,8 @@ const (
 	maxAdaptiveShardSyncConcurrency = 16
 	shardSyncBatchSize              = 500
 	shardSyncTimeout                = 5 * time.Minute
+	shardSyncRetryDelay             = 500 * time.Millisecond
+	shardSyncMaxRetryDelay          = 10 * time.Second
 	offlineDrainGracePeriod         = 15 * time.Minute
 	onlineResumeGracePeriod         = 15 * time.Minute
 	offlineDrainCheckInterval       = time.Minute
@@ -409,8 +411,7 @@ func sameReplicaSet(a, b []string) bool {
 	return true
 }
 
-func (s *Server) syncAssignedShardsAsync(oldRouting, newRouting map[string]RoutingEntry) {
-	tasks := shardSyncTasksForNode(s.nodeID, oldRouting, newRouting)
+func (s *Server) syncAssignedShardsAsync(tasks []shardSyncTask) {
 	if len(tasks) == 0 {
 		return
 	}
@@ -466,14 +467,7 @@ func (s *Server) syncAssignedShards(ctx context.Context, tasks []shardSyncTask) 
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-
-			err := s.syncShardAssignment(ctx, task)
-			s.finishShardSync(task.current, err == nil)
-			if err != nil {
-				log.Printf("shard sync failed for %s/%s shard %d: %v", task.current.IndexName, task.current.Day, task.current.ShardID, err)
-				return
-			}
-			log.Printf("shard sync complete for %s/%s shard %d", task.current.IndexName, task.current.Day, task.current.ShardID)
+			s.syncAssignedShardUntilReady(ctx, task)
 		}()
 	}
 
@@ -535,9 +529,108 @@ func (s *Server) finishShardSync(route RoutingEntry, success bool) {
 	s.shardSyncMu.Lock()
 	defer s.shardSyncMu.Unlock()
 
-	delete(s.shardSyncingVersion, key)
+	if s.shardSyncingVersion[key] == route.Version {
+		delete(s.shardSyncingVersion, key)
+	}
 	if success && s.shardSyncedVersion[key] < route.Version {
 		s.shardSyncedVersion[key] = route.Version
+		delete(s.shardSyncPending, key)
+	}
+}
+
+func (s *Server) notePendingShardSyncTasks(tasks []shardSyncTask, newRouting map[string]RoutingEntry) {
+	s.shardSyncMu.Lock()
+	defer s.shardSyncMu.Unlock()
+
+	for _, task := range tasks {
+		key := routingMapKey(task.current.IndexName, task.current.Day, task.current.ShardID)
+		if s.shardSyncPending[key] < task.current.Version {
+			s.shardSyncPending[key] = task.current.Version
+		}
+	}
+
+	for key := range s.shardSyncPending {
+		route, ok := newRouting[key]
+		if !ok || !routeHasReplica(route, s.nodeID) {
+			delete(s.shardSyncPending, key)
+			delete(s.shardSyncingVersion, key)
+		}
+	}
+}
+
+func (s *Server) shardReadyForReplicaTraffic(indexName, day string, shardID int) bool {
+	route, ok := s.getRouting(indexName, day, shardID)
+	if !ok || !routeHasReplica(route, s.nodeID) {
+		return false
+	}
+	if s.replicaNeedsRepair(indexName, day, shardID, s.nodeID) {
+		return false
+	}
+	return s.shardReadyForRoute(route)
+}
+
+func (s *Server) shardReadyForRoute(route RoutingEntry) bool {
+	key := routingMapKey(route.IndexName, route.Day, route.ShardID)
+
+	s.shardSyncMu.Lock()
+	defer s.shardSyncMu.Unlock()
+
+	pendingVersion := s.shardSyncPending[key]
+	if pendingVersion == 0 {
+		return true
+	}
+	return s.shardSyncedVersion[key] >= pendingVersion
+}
+
+func (s *Server) markShardReadyForRoute(route RoutingEntry) {
+	key := routingMapKey(route.IndexName, route.Day, route.ShardID)
+
+	s.shardSyncMu.Lock()
+	defer s.shardSyncMu.Unlock()
+
+	if s.shardSyncedVersion[key] < route.Version {
+		s.shardSyncedVersion[key] = route.Version
+	}
+	delete(s.shardSyncPending, key)
+}
+
+func (s *Server) syncAssignedShardUntilReady(ctx context.Context, task shardSyncTask) {
+	delay := shardSyncRetryDelay
+
+	for {
+		if ctx.Err() != nil {
+			s.finishShardSync(task.current, false)
+			return
+		}
+
+		currentRoute, ok := s.getRouting(task.current.IndexName, task.current.Day, task.current.ShardID)
+		if !ok || !routeHasReplica(currentRoute, s.nodeID) {
+			s.finishShardSync(task.current, false)
+			return
+		}
+		if currentRoute.Version != task.current.Version {
+			s.finishShardSync(task.current, false)
+			return
+		}
+
+		err := s.syncShardAssignment(ctx, task)
+		if err == nil {
+			s.finishShardSync(task.current, true)
+			log.Printf("shard sync complete for %s/%s shard %d", task.current.IndexName, task.current.Day, task.current.ShardID)
+			return
+		}
+
+		log.Printf("shard sync failed for %s/%s shard %d: %v", task.current.IndexName, task.current.Day, task.current.ShardID, err)
+		if !sleepWithContext(ctx, delay) {
+			s.finishShardSync(task.current, false)
+			return
+		}
+		if delay < shardSyncMaxRetryDelay {
+			delay *= 2
+			if delay > shardSyncMaxRetryDelay {
+				delay = shardSyncMaxRetryDelay
+			}
+		}
 	}
 }
 

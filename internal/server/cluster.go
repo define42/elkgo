@@ -113,6 +113,22 @@ func (s *Server) loadOfflineStates(ctx context.Context) error {
 }
 
 func (s *Server) watchMembers(ctx context.Context) {
+	previousMembers := s.snapshotMembers()
+	if err := s.loadMembers(ctx); err != nil {
+		log.Printf("initial load members failed: %v", err)
+	} else {
+		currentMembers := s.snapshotMembers()
+		if err := s.reconcileOfflineMarkers(ctx, previousMembers, currentMembers); err != nil {
+			log.Printf("initial reconcile offline markers failed: %v", err)
+		}
+		if err := s.loadOfflineStates(ctx); err != nil {
+			log.Printf("initial load offline states after member update failed: %v", err)
+		}
+		if shouldRebalanceForMemberChange(previousMembers, currentMembers) {
+			go s.maybeRebalanceRouting(s.backgroundCtx)
+		}
+	}
+
 	watchCh := s.etcd.Watch(ctx, s.memberPrefix, clientv3.WithPrefix())
 	for wr := range watchCh {
 		if wr.Err() != nil {
@@ -138,6 +154,10 @@ func (s *Server) watchMembers(ctx context.Context) {
 }
 
 func (s *Server) watchDrainStates(ctx context.Context) {
+	if err := s.loadMembers(ctx); err != nil {
+		log.Printf("initial load drain states failed: %v", err)
+	}
+
 	watchCh := s.etcd.Watch(ctx, s.drainPrefix, clientv3.WithPrefix())
 	for wr := range watchCh {
 		if wr.Err() != nil {
@@ -153,6 +173,10 @@ func (s *Server) watchDrainStates(ctx context.Context) {
 }
 
 func (s *Server) watchOfflineStates(ctx context.Context) {
+	if err := s.loadOfflineStates(ctx); err != nil {
+		log.Printf("initial load offline states failed: %v", err)
+	}
+
 	watchCh := s.etcd.Watch(ctx, s.offlinePrefix, clientv3.WithPrefix())
 	for wr := range watchCh {
 		if wr.Err() != nil {
@@ -208,13 +232,15 @@ func (s *Server) loadRouting(ctx context.Context) error {
 	partitionShardCounts, routingByIndexDay, routingByDay := buildRoutingLookups(routing)
 	s.routingMu.Lock()
 	oldRouting := s.routing
+	tasks := shardSyncTasksForNode(s.nodeID, oldRouting, routing)
 	s.routing = routing
 	s.partitionShardCounts = partitionShardCounts
 	s.routingByIndexDay = routingByIndexDay
 	s.routingByDay = routingByDay
+	s.notePendingShardSyncTasks(tasks, routing)
 	s.routingMu.Unlock()
 	s.clearReplicaCache()
-	s.syncAssignedShardsAsync(oldRouting, routing)
+	s.syncAssignedShardsAsync(tasks)
 	if err := s.cleanupObsoleteReplicaRepairStates(); err != nil {
 		return err
 	}
@@ -231,6 +257,10 @@ func (s *Server) loadRouting(ctx context.Context) error {
 }
 
 func (s *Server) watchRouting(ctx context.Context) {
+	if err := s.loadRouting(ctx); err != nil {
+		log.Printf("initial load routing failed: %v", err)
+	}
+
 	watchCh := s.etcd.Watch(ctx, s.routingPrefix, clientv3.WithPrefix())
 	for wr := range watchCh {
 		if wr.Err() != nil {

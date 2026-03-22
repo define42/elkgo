@@ -124,6 +124,7 @@ type internalIndexBatchRequest struct {
 	ShardID   int                      `json:"shard_id"`
 	Items     []internalIndexBatchItem `json:"items"`
 	Replicate bool                     `json:"replicate"`
+	Repair    bool                     `json:"repair,omitempty"`
 }
 
 type internalIndexBatchResponse struct {
@@ -190,10 +191,13 @@ type Server struct {
 	mu      sync.RWMutex
 	indexes map[string]bleve.Index
 
+	shardWriteLocks sync.Map
+
 	replicaCacheMu sync.RWMutex
 	replicaCache   map[string]string
 
 	shardSyncMu         sync.Mutex
+	shardSyncPending    map[string]int64
 	shardSyncingVersion map[string]int64
 	shardSyncedVersion  map[string]int64
 

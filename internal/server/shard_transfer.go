@@ -29,11 +29,7 @@ func normalizeStreamedBatchItem(route RoutingEntry, doc Document) (internalIndex
 }
 
 func (s *Server) streamExistingShardDocuments(indexName, day string, shardID int, onDoc func(Document) error) error {
-	idx, err := s.openExistingShardIndex(indexName, day, shardID)
-	if err != nil {
-		return err
-	}
-	return streamAllDocs(idx, onDoc)
+	return s.streamAllDocs(indexName, day, shardID, onDoc)
 }
 
 func (s *Server) restoreStreamedShardDocuments(route RoutingEntry, stream func(func(Document) error) error) (int, error) {
@@ -94,6 +90,7 @@ func (s *Server) streamShardToReplica(route RoutingEntry, nodeID string) (int, e
 			ShardID:   route.ShardID,
 			Items:     items,
 			Replicate: false,
+			Repair:    true,
 		}, &resp)
 		cancel()
 		if err != nil {

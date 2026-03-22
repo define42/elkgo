@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -218,11 +221,7 @@ func TestHandleInternalIndexBatch_CoversValidationAndLocalIndexing(t *testing.T)
 		t.Fatalf("unexpected local replica batch response: %#v", localReplicaResp)
 	}
 
-	idx, err := s.openExistingShardIndex("events", day, localReplicaShard)
-	if err != nil {
-		t.Fatalf("open local replica shard: %v", err)
-	}
-	docs, err := s.dumpAllDocs(idx)
+	docs, err := s.dumpAllDocs("events", day, localReplicaShard)
 	if err != nil {
 		t.Fatalf("dump local replica docs: %v", err)
 	}
@@ -442,8 +441,13 @@ func TestShardSyncAndReplicaRepairHelpers(t *testing.T) {
 	target.routingMu.Lock()
 	target.routing[routeKey] = asyncRoute
 	target.routingMu.Unlock()
+	asyncTasks := shardSyncTasksForNode("n1", map[string]RoutingEntry{routeKey: oldRoute}, map[string]RoutingEntry{routeKey: asyncRoute})
+	target.notePendingShardSyncTasks(asyncTasks, map[string]RoutingEntry{routeKey: asyncRoute})
+	if target.shardReadyForReplicaTraffic("events", daySync, shardSync) {
+		t.Fatalf("expected newly assigned shard to stay unready until sync completes")
+	}
 
-	target.syncAssignedShardsAsync(map[string]RoutingEntry{routeKey: oldRoute}, map[string]RoutingEntry{routeKey: asyncRoute})
+	target.syncAssignedShardsAsync(asyncTasks)
 
 	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "async shard sync", func() (bool, error) {
 		target.shardSyncMu.Lock()
@@ -452,11 +456,7 @@ func TestShardSyncAndReplicaRepairHelpers(t *testing.T) {
 		if syncedVersion != asyncRoute.Version {
 			return false, nil
 		}
-		idx, err := target.openExistingShardIndex("events", daySync, shardSync)
-		if err != nil {
-			return false, nil
-		}
-		docs, err := target.dumpAllDocs(idx)
+		docs, err := target.dumpAllDocs("events", daySync, shardSync)
 		if err != nil {
 			return false, err
 		}
@@ -515,16 +515,343 @@ func TestShardSyncAndReplicaRepairHelpers(t *testing.T) {
 		if target.replicaNeedsRepair("events", dayRepair, shardRepair, "n2") {
 			return false, nil
 		}
-		idx, err := source.openExistingShardIndex("events", dayRepair, shardRepair)
-		if err != nil {
-			return false, nil
-		}
-		docs, err := source.dumpAllDocs(idx)
+		docs, err := source.dumpAllDocs("events", dayRepair, shardRepair)
 		if err != nil {
 			return false, err
 		}
 		return len(docs) == 1 && docs[0]["id"] == "repair-doc", nil
 	})
+}
+
+func TestSyncAssignedShardsAsync_RetriesUntilSourceReady(t *testing.T) {
+	source, sourceTS := newNamedTestHTTPServer(t, "n2")
+	target, _ := newNamedTestHTTPServer(t, "n1")
+
+	day := "2026-03-23"
+	shardID := 22
+	setTestRoute(source, "events", day, shardID, []string{"n2"})
+	indexTestDocument(t, source, "events", day, shardID, "sync-retry-doc", Document{
+		"id":        "sync-retry-doc",
+		"timestamp": day + "T08:00:00Z",
+		"message":   "retry until source is ready",
+	})
+
+	var gateMu sync.Mutex
+	blocked := true
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gateMu.Lock()
+		currentlyBlocked := blocked
+		gateMu.Unlock()
+
+		if currentlyBlocked && (strings.HasPrefix(r.URL.Path, "/internal/snapshot_shard") || strings.HasPrefix(r.URL.Path, "/internal/stream_docs")) {
+			http.Error(w, "source warming up", http.StatusServiceUnavailable)
+			return
+		}
+
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, sourceTS.URL+r.URL.RequestURI(), r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		req.Header = r.Header.Clone()
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		for key, values := range resp.Header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	}))
+	defer proxy.Close()
+
+	target.membersMu.Lock()
+	target.members["n2"] = NodeInfo{ID: "n2", Addr: proxy.URL}
+	target.membersMu.Unlock()
+
+	oldRoute := RoutingEntry{
+		IndexName: "events",
+		Day:       day,
+		ShardID:   shardID,
+		Replicas:  []string{"n2"},
+		Version:   10,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	newRoute := RoutingEntry{
+		IndexName: "events",
+		Day:       day,
+		ShardID:   shardID,
+		Replicas:  []string{"n2", "n1"},
+		Version:   11,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	routeKey := routingMapKey("events", day, shardID)
+	target.routingMu.Lock()
+	target.routing[routeKey] = newRoute
+	target.routingMu.Unlock()
+
+	tasks := shardSyncTasksForNode("n1", map[string]RoutingEntry{routeKey: oldRoute}, map[string]RoutingEntry{routeKey: newRoute})
+	target.notePendingShardSyncTasks(tasks, map[string]RoutingEntry{routeKey: newRoute})
+	target.syncAssignedShardsAsync(tasks)
+
+	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "pending sync before source ready", func() (bool, error) {
+		return !target.shardReadyForReplicaTraffic("events", day, shardID), nil
+	})
+
+	gateMu.Lock()
+	blocked = false
+	gateMu.Unlock()
+
+	waitForTestCondition(t, 10*time.Second, 50*time.Millisecond, "async shard sync retry", func() (bool, error) {
+		docs, err := target.dumpAllDocs("events", day, shardID)
+		if err != nil {
+			return false, err
+		}
+		if len(docs) != 1 || docs[0]["id"] != "sync-retry-doc" {
+			return false, nil
+		}
+		return target.shardReadyForReplicaTraffic("events", day, shardID), nil
+	})
+}
+
+func TestStreamShardToReplica_RepairBypassesSyncGate(t *testing.T) {
+	source, _ := newNamedTestHTTPServer(t, "n1")
+	target, targetTS := newNamedTestHTTPServer(t, "n2")
+
+	day := "2026-03-24"
+	shardID := 23
+	setTestRoute(source, "events", day, shardID, []string{"n1"})
+	setTestRoute(target, "events", day, shardID, []string{"n2"})
+	indexTestDocument(t, source, "events", day, shardID, "repair-stream-doc", Document{
+		"id":        "repair-stream-doc",
+		"timestamp": day + "T10:15:00Z",
+		"message":   "repair stream can write while syncing",
+	})
+
+	source.membersMu.Lock()
+	source.members["n2"] = NodeInfo{ID: "n2", Addr: targetTS.URL}
+	source.membersMu.Unlock()
+
+	route, ok := target.getRouting("events", day, shardID)
+	if !ok {
+		t.Fatalf("expected target route to exist")
+	}
+	target.notePendingShardSyncTasks([]shardSyncTask{{
+		current: route,
+	}}, map[string]RoutingEntry{
+		routingMapKey("events", day, shardID): route,
+	})
+	if target.shardReadyForReplicaTraffic("events", day, shardID) {
+		t.Fatalf("expected target shard to remain unready while syncing")
+	}
+
+	restored, err := source.streamShardToReplica(route, "n2")
+	if err != nil {
+		t.Fatalf("stream shard to replica while syncing: %v", err)
+	}
+	if restored != 1 {
+		t.Fatalf("expected 1 restored document, got %d", restored)
+	}
+
+	docs, err := target.dumpAllDocs("events", day, shardID)
+	if err != nil {
+		t.Fatalf("dump docs after repair stream: %v", err)
+	}
+	if len(docs) != 1 || docs[0]["id"] != "repair-stream-doc" {
+		t.Fatalf("unexpected streamed repair docs: %#v", docs)
+	}
+}
+
+func TestRouteHelpersAndReplicaRepairLoopEdges(t *testing.T) {
+	s, _ := newNamedTestHTTPServer(t, "n1")
+
+	fallback := RoutingEntry{
+		IndexName: "events",
+		Day:       "2026-03-25",
+		ShardID:   5,
+		Replicas:  []string{"n1", "n2"},
+		Version:   12,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	route, err := s.currentRouteForShard("events", "2026-03-25", 5, fallback)
+	if err != nil {
+		t.Fatalf("currentRouteForShard with fallback: %v", err)
+	}
+	if route.Version != fallback.Version {
+		t.Fatalf("expected fallback route version %d, got %#v", fallback.Version, route)
+	}
+
+	setTestRoute(s, "events", "2026-03-25", 5, []string{"n1"})
+	route, err = s.currentRouteForShard("events", "2026-03-25", 5, RoutingEntry{})
+	if err != nil {
+		t.Fatalf("currentRouteForShard with stored route: %v", err)
+	}
+	if len(route.Replicas) != 1 || route.Replicas[0] != "n1" {
+		t.Fatalf("unexpected stored route: %#v", route)
+	}
+
+	if _, err := s.currentRouteForShard("missing", "2026-03-25", 5, RoutingEntry{}); err == nil {
+		t.Fatalf("expected missing route error")
+	}
+
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{err: fmt.Errorf("primary not assigned to this node"), want: true},
+		{err: fmt.Errorf("primary not registered"), want: true},
+		{err: fmt.Errorf("routing not initialized for shard"), want: true},
+		{err: fmt.Errorf("replica syncing"), want: false},
+		{err: nil, want: false},
+	} {
+		if got := shouldRetryRouteError(tc.err); got != tc.want {
+			t.Fatalf("shouldRetryRouteError(%v)=%v want %v", tc.err, got, tc.want)
+		}
+	}
+
+	missingKey := replicaRepairMapKey("events", "2026-03-26", 7, "n2")
+	s.replicaRepairMu.Lock()
+	s.replicaRepairStates[missingKey] = ReplicaRepairState{IndexName: "events", Day: "2026-03-26", ShardID: 7, NodeID: "n2"}
+	s.replicaRepairMu.Unlock()
+	s.noteReplicaRepairRequest(missingKey)
+	if !s.claimReplicaRepairWorker(missingKey) {
+		t.Fatalf("expected missing-route repair worker claim to succeed")
+	}
+	s.repairReplicaLoop("events", "2026-03-26", 7, "n2")
+	if s.replicaNeedsRepair("events", "2026-03-26", 7, "n2") {
+		t.Fatalf("expected missing-route repair state to be cleared")
+	}
+	if s.latestReplicaRepairRequest(missingKey) != 0 {
+		t.Fatalf("expected missing-route repair request to be cleared")
+	}
+
+	day := "2026-03-27"
+	shardID := 8
+	setTestRoute(s, "events", day, shardID, []string{"n2", "n1"})
+	nonPrimaryKey := replicaRepairMapKey("events", day, shardID, "n2")
+	s.replicaRepairMu.Lock()
+	s.replicaRepairStates[nonPrimaryKey] = ReplicaRepairState{IndexName: "events", Day: day, ShardID: shardID, NodeID: "n2"}
+	s.replicaRepairMu.Unlock()
+	s.noteReplicaRepairRequest(nonPrimaryKey)
+	if !s.claimReplicaRepairWorker(nonPrimaryKey) {
+		t.Fatalf("expected non-primary repair worker claim to succeed")
+	}
+	s.repairReplicaLoop("events", day, shardID, "n2")
+	if !s.replicaNeedsRepair("events", day, shardID, "n2") {
+		t.Fatalf("expected non-primary repair state to remain for another primary")
+	}
+}
+
+func TestHandleIndexRetention_WithoutEtcd(t *testing.T) {
+	s, ts := newTestHTTPServer(t)
+
+	s.indexRetentionMu.Lock()
+	s.indexRetentionPolicies["events"] = IndexRetentionPolicy{
+		IndexName:     "events",
+		RetentionDays: 30,
+		UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
+	}
+	s.indexRetentionMu.Unlock()
+
+	resp, err := http.Get(ts.URL + "/admin/index_retention")
+	if err != nil {
+		t.Fatalf("GET /admin/index_retention: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected list status 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(ts.URL + "/admin/index_retention?index=events")
+	if err != nil {
+		t.Fatalf("GET /admin/index_retention?index=events: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected single policy status 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(ts.URL + "/admin/index_retention?index=missing")
+	if err != nil {
+		t.Fatalf("GET /admin/index_retention?index=missing: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected missing policy status 404, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/admin/index_retention", nil)
+	if err != nil {
+		t.Fatalf("new POST request without index: %v", err)
+	}
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /admin/index_retention without index: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected POST without index status 400, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, err = http.NewRequest(http.MethodPost, ts.URL+"/admin/index_retention?index=events&retention_days=bad", nil)
+	if err != nil {
+		t.Fatalf("new POST request with invalid retention: %v", err)
+	}
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /admin/index_retention invalid retention: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected POST invalid retention status 400, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, err = http.NewRequest(http.MethodPost, ts.URL+"/admin/index_retention?index=events&retention_days=14", nil)
+	if err != nil {
+		t.Fatalf("new POST request with etcd missing: %v", err)
+	}
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /admin/index_retention with missing etcd: %v", err)
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected POST missing etcd status 500, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, err = http.NewRequest(http.MethodDelete, ts.URL+"/admin/index_retention", nil)
+	if err != nil {
+		t.Fatalf("new DELETE request without index: %v", err)
+	}
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE /admin/index_retention without index: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected DELETE without index status 400, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	req, err = http.NewRequest(http.MethodDelete, ts.URL+"/admin/index_retention?index=events", nil)
+	if err != nil {
+		t.Fatalf("new DELETE request with etcd missing: %v", err)
+	}
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE /admin/index_retention with missing etcd: %v", err)
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected DELETE missing etcd status 500, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
 }
 
 func TestInternalShardReadHandlers_ValidationAndAvailability(t *testing.T) {

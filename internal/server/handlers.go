@@ -340,6 +340,10 @@ func (s *Server) handleInternalIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "replica not assigned to this node", http.StatusForbidden)
 		return
 	}
+	if !s.shardReadyForReplicaTraffic(req.IndexName, req.Day, req.ShardID) {
+		http.Error(w, "replica syncing", http.StatusServiceUnavailable)
+		return
+	}
 	docID := req.DocID
 	if docID == "" {
 		var err error
@@ -375,17 +379,16 @@ func (s *Server) handleDumpDocs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "replica not assigned", http.StatusForbidden)
 		return
 	}
-	idx, err := s.openExistingShardIndex(indexName, day, shardID)
+	if s.ownsReplica(indexName, day, shardID) && !s.shardReadyForReplicaTraffic(indexName, day, shardID) {
+		http.Error(w, "replica syncing", http.StatusServiceUnavailable)
+		return
+	}
+	docs, err := s.dumpAllDocs(indexName, day, shardID)
 	if err != nil {
 		if err == errShardIndexMissing {
 			http.Error(w, "shard not available", http.StatusServiceUnavailable)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	docs, err := s.dumpAllDocs(idx)
-	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -408,14 +411,8 @@ func (s *Server) handleStreamDocs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "replica not assigned", http.StatusForbidden)
 		return
 	}
-
-	idx, err := s.openExistingShardIndex(indexName, day, shardID)
-	if err != nil {
-		if err == errShardIndexMissing {
-			http.Error(w, "shard not available", http.StatusServiceUnavailable)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if s.ownsReplica(indexName, day, shardID) && !s.shardReadyForReplicaTraffic(indexName, day, shardID) {
+		http.Error(w, "replica syncing", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -423,7 +420,7 @@ func (s *Server) handleStreamDocs(w http.ResponseWriter, r *http.Request) {
 	flusher, _ := w.(http.Flusher)
 	enc := json.NewEncoder(w)
 	streamed := 0
-	if err := streamAllDocs(idx, func(doc Document) error {
+	if err := s.streamAllDocs(indexName, day, shardID, func(doc Document) error {
 		if err := enc.Encode(doc); err != nil {
 			return err
 		}
@@ -433,6 +430,10 @@ func (s *Server) handleStreamDocs(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	}); err != nil {
+		if err == errShardIndexMissing {
+			http.Error(w, "shard not available", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -480,7 +481,7 @@ func (s *Server) handleSnapshotShard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := writeShardSnapshotArchive(idx, archivePath); err != nil {
+	if err := s.writeShardSnapshotArchive(indexName, day, shardID, idx, archivePath); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -526,6 +527,9 @@ func (s *Server) handleInstallSnapshotShard(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if route, ok := s.getRouting(indexName, day, shardID); ok && routeHasReplica(route, s.nodeID) {
+		s.markShardReadyForRoute(route)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":       true,
 		"index":    indexName,
@@ -550,6 +554,10 @@ func (s *Server) handleShardStats(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.ownsReplica(indexName, day, shardID) {
 		http.Error(w, "replica not assigned", http.StatusForbidden)
+		return
+	}
+	if !s.shardReadyForReplicaTraffic(indexName, day, shardID) {
+		http.Error(w, "replica syncing", http.StatusServiceUnavailable)
 		return
 	}
 	idx, err := s.openExistingShardIndex(indexName, day, shardID)

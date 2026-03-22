@@ -15,13 +15,21 @@ import (
 
 var errShardIndexMissing = errors.New("shard index missing")
 
-func streamAllDocs(idx bleve.Index, fn func(Document) error) error {
+func (s *Server) streamAllDocs(indexName, day string, shardID int, fn func(Document) error) error {
 	const pageSize = 500
+
+	idx, err := s.openExistingShardIndex(indexName, day, shardID)
+	if err != nil {
+		return err
+	}
+
+	reader := newShardSourceReader(s, indexName, day, shardID)
+	defer reader.Close()
 
 	var after []string
 	for {
 		req := bleve.NewSearchRequestOptions(bleve.NewMatchAllQuery(), pageSize, 0, false)
-		req.Fields = []string{"*"}
+		req.Fields = sourcePointerFieldNames()
 		req.SortBy([]string{"_id"})
 		if len(after) > 0 {
 			req.SetSearchAfter(after)
@@ -36,9 +44,9 @@ func streamAllDocs(idx bleve.Index, fn func(Document) error) error {
 		}
 
 		for _, h := range res.Hits {
-			doc := docFromBleveFields(h.Fields)
-			if _, ok := doc["id"]; !ok {
-				doc["id"] = h.ID
+			doc, err := readSourceDocumentFromFields(reader, h.ID, h.Fields)
+			if err != nil {
+				return err
 			}
 			if err := fn(doc); err != nil {
 				return err
@@ -51,11 +59,11 @@ func streamAllDocs(idx bleve.Index, fn func(Document) error) error {
 	return nil
 }
 
-func (s *Server) dumpAllDocs(idx bleve.Index) ([]Document, error) {
+func (s *Server) dumpAllDocs(indexName, day string, shardID int) ([]Document, error) {
 	const pageSize = 500
 
 	out := make([]Document, 0, pageSize)
-	if err := streamAllDocs(idx, func(doc Document) error {
+	if err := s.streamAllDocs(indexName, day, shardID, func(doc Document) error {
 		out = append(out, cloneDocument(doc))
 		return nil
 	}); err != nil {
@@ -69,23 +77,31 @@ func shardEventCount(idx bleve.Index) (uint64, error) {
 	return idx.DocCount()
 }
 
-func fetchDocumentsByID(idx bleve.Index, docIDs []string) (map[string]Document, error) {
+func (s *Server) fetchDocumentsByID(indexName, day string, shardID int, docIDs []string) (map[string]Document, error) {
 	if len(docIDs) == 0 {
 		return map[string]Document{}, nil
 	}
 
+	idx, err := s.openExistingShardIndex(indexName, day, shardID)
+	if err != nil {
+		return nil, err
+	}
+
 	req := bleve.NewSearchRequestOptions(bleve.NewDocIDQuery(docIDs), len(docIDs), 0, false)
-	req.Fields = []string{"*"}
+	req.Fields = sourcePointerFieldNames()
 	searchResult, err := idx.Search(req)
 	if err != nil {
 		return nil, err
 	}
 
+	reader := newShardSourceReader(s, indexName, day, shardID)
+	defer reader.Close()
+
 	out := make(map[string]Document, len(searchResult.Hits))
 	for _, hit := range searchResult.Hits {
-		doc := docFromBleveFields(hit.Fields)
-		if _, ok := doc["id"]; !ok {
-			doc["id"] = hit.ID
+		doc, err := readSourceDocumentFromFields(reader, hit.ID, hit.Fields)
+		if err != nil {
+			return nil, err
 		}
 		out[hit.ID] = doc
 	}
@@ -116,34 +132,35 @@ func pathSizeBytes(path string) (uint64, error) {
 }
 
 func (s *Server) shardStorageSize(indexName, day string, shardID int) (uint64, error) {
-	return pathSizeBytes(s.shardIndexPath(indexName, day, shardID))
-}
+	total := uint64(0)
+	found := false
 
-func docFromBleveFields(fields map[string]interface{}) Document {
-	doc := Document{}
-	for k, v := range fields {
-		doc[k] = normalizeBleveField(v)
+	bleveSize, err := pathSizeBytes(s.shardIndexPath(indexName, day, shardID))
+	switch {
+	case err == nil:
+		total += bleveSize
+		found = true
+	case err != nil && !errors.Is(err, errShardIndexMissing):
+		return 0, err
 	}
-	return doc
-}
 
-func normalizeBleveField(v interface{}) interface{} {
-	switch x := v.(type) {
-	case []interface{}:
-		out := make([]interface{}, 0, len(x))
-		for _, e := range x {
-			out = append(out, normalizeBleveField(e))
-		}
-		return out
-	case map[string]interface{}:
-		out := make(map[string]interface{}, len(x))
-		for k, e := range x {
-			out[k] = normalizeBleveField(e)
-		}
-		return out
-	default:
-		return x
+	segmentPaths, err := s.shardSourceSegmentPaths(indexName, day, shardID)
+	if err != nil {
+		return 0, err
 	}
+	for _, segmentPath := range segmentPaths {
+		size, err := pathSizeBytes(segmentPath)
+		if err != nil {
+			return 0, err
+		}
+		total += size
+		found = true
+	}
+
+	if !found {
+		return 0, errShardIndexMissing
+	}
+	return total, nil
 }
 
 func (s *Server) shardIndexPath(indexName, day string, shardID int) string {
@@ -310,13 +327,27 @@ func (s *Server) trimIndexCacheLocked(protectedKey string) {
 func buildIndexMapping() blevemapping.IndexMapping {
 	indexMapping := bleve.NewIndexMapping()
 	indexMapping.DefaultAnalyzer = "standard"
+	indexMapping.StoreDynamic = false
 	docMapping := bleve.NewDocumentMapping()
 	docMapping.Dynamic = true
 	keywordField := bleve.NewKeywordFieldMapping()
 	docMapping.AddFieldMappingsAt("id", keywordField)
 	docMapping.AddFieldMappingsAt("partition_day", keywordField)
+	docMapping.AddFieldMappingsAt(sourceFieldSegment, storedOnlyNumericFieldMapping())
+	docMapping.AddFieldMappingsAt(sourceFieldOffset, storedOnlyNumericFieldMapping())
+	docMapping.AddFieldMappingsAt(sourceFieldCompressedLength, storedOnlyNumericFieldMapping())
+	docMapping.AddFieldMappingsAt(sourceFieldRawLength, storedOnlyNumericFieldMapping())
 	indexMapping.DefaultMapping = docMapping
 	return indexMapping
+}
+
+func storedOnlyNumericFieldMapping() *blevemapping.FieldMapping {
+	field := bleve.NewNumericFieldMapping()
+	field.Store = true
+	field.Index = false
+	field.DocValues = false
+	field.IncludeInAll = false
+	return field
 }
 
 func normalizeGenericDocument(doc Document) (string, string, error) {

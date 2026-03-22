@@ -330,6 +330,10 @@ func (s *Server) handleSearchShard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if s.ownsReplica(req.IndexName, req.Day, req.ShardID) && !s.shardReadyForReplicaTraffic(req.IndexName, req.Day, req.ShardID) {
+		http.Error(w, "replica syncing", http.StatusServiceUnavailable)
+		return
+	}
 	idx, err := s.openExistingShardIndex(req.IndexName, req.Day, req.ShardID)
 	if err != nil {
 		if err == errShardIndexMissing {
@@ -340,19 +344,30 @@ func (s *Server) handleSearchShard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	searchReq := bleve.NewSearchRequestOptions(buildBleveQuery(req.Query), req.K, 0, false)
-	if req.FetchDocs {
-		searchReq.Fields = []string{"*"}
-	}
 	searchResult, err := idx.Search(searchReq)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	var docsByID map[string]Document
+	if req.FetchDocs {
+		docIDs := make([]string, 0, len(searchResult.Hits))
+		for _, hit := range searchResult.Hits {
+			docIDs = append(docIDs, hit.ID)
+		}
+		docsByID, err = s.fetchDocumentsByID(req.IndexName, req.Day, req.ShardID, docIDs)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
 	resp := SearchShardResponse{Hits: make([]ShardHit, 0, len(searchResult.Hits))}
 	for _, h := range searchResult.Hits {
 		hit := ShardHit{Index: req.IndexName, Day: req.Day, Shard: req.ShardID, Score: h.Score, DocID: h.ID}
 		if req.FetchDocs {
-			hit.Source = docFromBleveFields(h.Fields)
+			hit.Source = docsByID[h.ID]
 		}
 		resp.Hits = append(resp.Hits, hit)
 	}
@@ -374,18 +389,12 @@ func (s *Server) handleFetchDocs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "replica not assigned", http.StatusForbidden)
 		return
 	}
-
-	idx, err := s.openExistingShardIndex(req.IndexName, req.Day, req.ShardID)
-	if err != nil {
-		if err == errShardIndexMissing {
-			http.Error(w, "shard not available", http.StatusServiceUnavailable)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if s.ownsReplica(req.IndexName, req.Day, req.ShardID) && !s.shardReadyForReplicaTraffic(req.IndexName, req.Day, req.ShardID) {
+		http.Error(w, "replica syncing", http.StatusServiceUnavailable)
 		return
 	}
 
-	docs, err := fetchDocumentsByID(idx, req.DocIDs)
+	docs, err := s.fetchDocumentsByID(req.IndexName, req.Day, req.ShardID, req.DocIDs)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

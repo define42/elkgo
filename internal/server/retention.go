@@ -60,6 +60,10 @@ func (s *Server) watchIndexRetentionPolicies(ctx context.Context) {
 		return
 	}
 
+	if err := s.loadIndexRetentionPolicies(ctx); err != nil {
+		log.Printf("initial load index retention policies failed: %v", err)
+	}
+
 	watchCh := s.etcd.Watch(ctx, s.indexRetentionPrefix, clientv3.WithPrefix())
 	for wr := range watchCh {
 		if wr.Err() != nil {

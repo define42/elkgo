@@ -55,6 +55,10 @@ func (s *Server) watchReplicaRepairStates(ctx context.Context) {
 		return
 	}
 
+	if err := s.loadReplicaRepairStates(ctx); err != nil {
+		log.Printf("initial load replica repair states failed: %v", err)
+	}
+
 	watchCh := s.etcd.Watch(ctx, s.replicaRepairPrefix, clientv3.WithPrefix())
 	for wr := range watchCh {
 		if wr.Err() != nil {

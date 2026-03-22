@@ -35,6 +35,7 @@ func New(cfg Config) *Server {
 		client:                 &http.Client{Timeout: 8 * time.Second},
 		indexes:                map[string]bleve.Index{},
 		replicaCache:           map[string]string{},
+		shardSyncPending:       map[string]int64{},
 		shardSyncingVersion:    map[string]int64{},
 		shardSyncedVersion:     map[string]int64{},
 		etcdEndpoints:          append([]string(nil), cfg.ETCDEndpoints...),

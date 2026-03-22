@@ -1,5 +1,7 @@
 # elkgo
 
+[![codecov](https://codecov.io/gh/define42/elkgo/graph/badge.svg?token=H7DNP5V4QM)](https://codecov.io/gh/define42/elkgo)
+
 `elkgo` is a small distributed search service written in Go. It uses:
 
 - `etcd` for cluster membership and shard routing

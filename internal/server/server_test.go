@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/blevesearch/bleve/v2"
 )
 
 func TestHandleSearch_BlankQueryAcrossDayRangeReturnsAllDocuments(t *testing.T) {
@@ -224,6 +226,66 @@ func TestHandleBulkIngest_NDJSONIndexesDocuments(t *testing.T) {
 	}
 	if len(searchPayload.Hits) != 2 {
 		t.Fatalf("expected 2 search hits, got %d", len(searchPayload.Hits))
+	}
+}
+
+func TestIndexBatchLocal_StoresSourcePointerInBleveAndFetchesRawJSONFromWAL(t *testing.T) {
+	s, _ := newTestHTTPServer(t)
+
+	day := "2026-03-21"
+	shardID := 0
+	setTestRoute(s, "events", day, shardID, []string{"n1"})
+
+	indexTestDocument(t, s, "events", day, shardID, "wal-doc", Document{
+		"id":        "wal-doc",
+		"timestamp": day + "T10:00:00Z",
+		"message":   "stored outside bleve",
+		"service":   "api",
+		"latency":   42,
+	})
+
+	idx, err := s.openExistingShardIndex("events", day, shardID)
+	if err != nil {
+		t.Fatalf("open shard index: %v", err)
+	}
+
+	req := bleve.NewSearchRequestOptions(bleve.NewDocIDQuery([]string{"wal-doc"}), 1, 0, false)
+	req.Fields = []string{"*"}
+	res, err := idx.Search(req)
+	if err != nil {
+		t.Fatalf("search stored fields: %v", err)
+	}
+	if len(res.Hits) != 1 {
+		t.Fatalf("expected 1 hit, got %d", len(res.Hits))
+	}
+
+	fields := res.Hits[0].Fields
+	if _, ok := fields["message"]; ok {
+		t.Fatalf("expected dynamic field message to be omitted from stored Bleve fields, got %#v", fields)
+	}
+	if _, ok := fields[sourceFieldOffset]; !ok {
+		t.Fatalf("expected source pointer fields in stored Bleve fields, got %#v", fields)
+	}
+
+	docs, err := s.fetchDocumentsByID("events", day, shardID, []string{"wal-doc"})
+	if err != nil {
+		t.Fatalf("fetch documents by id: %v", err)
+	}
+	doc, ok := docs["wal-doc"]
+	if !ok {
+		t.Fatalf("expected wal-doc to be fetched from WAL")
+	}
+	if doc["message"] != "stored outside bleve" || doc["service"] != "api" {
+		t.Fatalf("unexpected source document: %#v", doc)
+	}
+
+	sourcePath := s.shardSourceSegmentPath("events", day, shardID, currentSourceSegment)
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		t.Fatalf("stat WAL sidecar: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatalf("expected non-empty WAL sidecar at %s", sourcePath)
 	}
 }
 
@@ -763,6 +825,18 @@ func TestSyncShardAssignment_PrefersSnapshotFromReplica(t *testing.T) {
 	if count != 2 {
 		t.Fatalf("expected 2 restored docs, got %d", count)
 	}
+	docs, err := target.dumpAllDocs("events", day, shardID)
+	if err != nil {
+		t.Fatalf("dump restored shard docs: %v", err)
+	}
+	if len(docs) != 2 {
+		t.Fatalf("expected 2 restored docs from dump, got %d", len(docs))
+	}
+	docIDs := []string{fmt.Sprint(docs[0]["id"]), fmt.Sprint(docs[1]["id"])}
+	sort.Strings(docIDs)
+	if !reflect.DeepEqual(docIDs, []string{"sync-a", "sync-b"}) {
+		t.Fatalf("unexpected restored docs after snapshot sync: %#v", docs)
+	}
 }
 
 func TestSyncShardAssignment_FallsBackToStreamedDocsWhenSnapshotUnavailable(t *testing.T) {
@@ -841,6 +915,13 @@ func TestSyncShardAssignment_FallsBackToStreamedDocsWhenSnapshotUnavailable(t *t
 	}
 	if count != 1 {
 		t.Fatalf("expected 1 restored doc after fallback, got %d", count)
+	}
+	docs, err := target.dumpAllDocs("events", day, shardID)
+	if err != nil {
+		t.Fatalf("dump fallback-restored shard docs: %v", err)
+	}
+	if len(docs) != 1 || docs[0]["message"] != "stream fallback doc" {
+		t.Fatalf("unexpected fallback-restored docs: %#v", docs)
 	}
 }
 
@@ -1693,11 +1774,10 @@ func setTestPartitionShardCount(s *Server, indexName, day string, shardCount int
 func indexTestDocument(t *testing.T, s *Server, indexName, day string, shardID int, docID string, doc Document) {
 	t.Helper()
 
-	idx, err := s.openShardIndex(indexName, day, shardID)
-	if err != nil {
-		t.Fatalf("open shard index: %v", err)
-	}
-	if err := idx.Index(docID, doc); err != nil {
+	if err := s.indexBatchLocal(indexName, day, shardID, []internalIndexBatchItem{{
+		DocID: docID,
+		Doc:   doc,
+	}}); err != nil {
 		t.Fatalf("index document: %v", err)
 	}
 }

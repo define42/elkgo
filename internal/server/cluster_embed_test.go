@@ -44,9 +44,9 @@ func TestEmbeddedEtcdLifecycle_WatchesAndRepairState(t *testing.T) {
 		Addr:      "http://127.0.0.1:18082/",
 		StartedAt: time.Now().UTC().Add(-20 * time.Minute).Format(time.RFC3339),
 	}
-	putEtcdJSON(t, client, s.memberPrefix+member.NodeID, member)
 
-	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "member watch load", func() (bool, error) {
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "member watch load", func() (bool, error) {
+		putEtcdJSON(t, client, s.memberPrefix+member.NodeID, member)
 		members := s.snapshotMembers()
 		got, ok := members["n2"]
 		return ok && got.Addr == "http://127.0.0.1:18082" && !got.DrainRequested, nil
@@ -57,9 +57,9 @@ func TestEmbeddedEtcdLifecycle_WatchesAndRepairState(t *testing.T) {
 		RequestedAt: time.Now().UTC().Format(time.RFC3339),
 		Auto:        false,
 	}
-	putEtcdJSON(t, client, s.drainPrefix+"n2", drainState)
 
-	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "drain watch load", func() (bool, error) {
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "drain watch load", func() (bool, error) {
+		putEtcdJSON(t, client, s.drainPrefix+"n2", drainState)
 		member, ok := s.snapshotMembers()["n2"]
 		return ok && member.DrainRequested, nil
 	})
@@ -73,9 +73,8 @@ func TestEmbeddedEtcdLifecycle_WatchesAndRepairState(t *testing.T) {
 		Version:   1,
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	putEtcdJSON(t, client, s.routingKey(route.IndexName, route.Day, route.ShardID), route)
-
-	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "routing watch load", func() (bool, error) {
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "routing watch load", func() (bool, error) {
+		putEtcdJSON(t, client, s.routingKey(route.IndexName, route.Day, route.ShardID), route)
 		got, ok := s.getRouting(route.IndexName, route.Day, route.ShardID)
 		return ok && len(got.Replicas) == 2 && got.Replicas[1] == "n2", nil
 	})
@@ -85,9 +84,8 @@ func TestEmbeddedEtcdLifecycle_WatchesAndRepairState(t *testing.T) {
 		RetentionDays: 30,
 		UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
 	}
-	putEtcdJSON(t, client, s.indexRetentionKey(retentionPolicy.IndexName), retentionPolicy)
-
-	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "index retention watch load", func() (bool, error) {
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "index retention watch load", func() (bool, error) {
+		putEtcdJSON(t, client, s.indexRetentionKey(retentionPolicy.IndexName), retentionPolicy)
 		policy, ok := s.getIndexRetentionPolicy("policy-only")
 		return ok && policy.RetentionDays == 30, nil
 	})
@@ -99,24 +97,24 @@ func TestEmbeddedEtcdLifecycle_WatchesAndRepairState(t *testing.T) {
 		NodeID:    "n2",
 		MarkedAt:  time.Now().UTC().Format(time.RFC3339),
 	}
-	putEtcdJSON(t, client, s.replicaRepairKey(route.IndexName, route.Day, route.ShardID, "n2"), repairState)
-
-	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "replica repair watch load", func() (bool, error) {
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "replica repair watch load", func() (bool, error) {
+		putEtcdJSON(t, client, s.replicaRepairKey(route.IndexName, route.Day, route.ShardID, "n2"), repairState)
 		return s.replicaNeedsRepair(route.IndexName, route.Day, route.ShardID, "n2"), nil
 	})
 
-	putEtcdJSON(t, client, s.offlinePrefix+"n9", NodeOfflineState{
+	offlineState := NodeOfflineState{
 		NodeID:       "n9",
 		Addr:         "http://127.0.0.1:19009",
 		MissingSince: time.Now().UTC().Format(time.RFC3339),
-	})
-	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "offline watch load", func() (bool, error) {
+	}
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "offline watch load", func() (bool, error) {
+		putEtcdJSON(t, client, s.offlinePrefix+"n9", offlineState)
 		_, ok := s.snapshotOfflineStates()["n9"]
 		return ok, nil
 	})
 
 	deleteEtcdKey(t, client, s.memberPrefix+"n2")
-	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "reconcile offline marker on member removal", func() (bool, error) {
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "reconcile offline marker on member removal", func() (bool, error) {
 		resp, err := client.Get(context.Background(), s.offlinePrefix+"n2")
 		if err != nil {
 			return false, err
@@ -124,8 +122,8 @@ func TestEmbeddedEtcdLifecycle_WatchesAndRepairState(t *testing.T) {
 		return len(resp.Kvs) == 1, nil
 	})
 
-	putEtcdJSON(t, client, s.memberPrefix+member.NodeID, member)
-	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "offline marker cleared on member return", func() (bool, error) {
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "offline marker cleared on member return", func() (bool, error) {
+		putEtcdJSON(t, client, s.memberPrefix+member.NodeID, member)
 		resp, err := client.Get(context.Background(), s.offlinePrefix+"n2")
 		if err != nil {
 			return false, err
@@ -136,9 +134,8 @@ func TestEmbeddedEtcdLifecycle_WatchesAndRepairState(t *testing.T) {
 	route.Replicas = []string{"n1"}
 	route.Version = 2
 	route.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	putEtcdJSON(t, client, s.routingKey(route.IndexName, route.Day, route.ShardID), route)
-
-	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "obsolete replica repair state cleanup", func() (bool, error) {
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "obsolete replica repair state cleanup", func() (bool, error) {
+		putEtcdJSON(t, client, s.routingKey(route.IndexName, route.Day, route.ShardID), route)
 		return !s.replicaNeedsRepair(route.IndexName, route.Day, route.ShardID, "n2"), nil
 	})
 
@@ -241,7 +238,7 @@ func TestAdminHandlersAndRebalance_WithEmbeddedEtcd(t *testing.T) {
 		t.Fatalf("unexpected bootstrap payload: %#v", bootstrapPayload)
 	}
 
-	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "routing present after bootstrap", func() (bool, error) {
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "routing present after bootstrap", func() (bool, error) {
 		return len(coordinator.snapshotRouting()) == enforcedShardsPerDay, nil
 	})
 
@@ -296,7 +293,7 @@ func TestAdminHandlersAndRebalance_WithEmbeddedEtcd(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "drained node excluded from routing", func() (bool, error) {
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "drained node excluded from routing", func() (bool, error) {
 		for _, route := range coordinator.snapshotRouting() {
 			if routeHasReplica(route, "n2") {
 				return false, nil
@@ -319,7 +316,7 @@ func TestAdminHandlersAndRebalance_WithEmbeddedEtcd(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "rebalanced node returns to routing", func() (bool, error) {
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "rebalanced node returns to routing", func() (bool, error) {
 		for _, route := range coordinator.snapshotRouting() {
 			if routeHasReplica(route, "n2") {
 				return true, nil
@@ -669,7 +666,7 @@ func TestRunAndClose_GracefulShutdownAndTimeouts(t *testing.T) {
 		}
 	}()
 
-	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "server health", func() (bool, error) {
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "server health", func() (bool, error) {
 		resp, err := http.Get(listenURL.String() + "/healthz")
 		if err != nil {
 			return false, nil

@@ -33,6 +33,7 @@ const (
 type integrationCluster struct {
 	coordinatorURL string
 	nodeURLs       []string
+	nodeContainers []*testcontainers.DockerContainer
 	imageName      string
 	networkName    string
 }
@@ -160,6 +161,7 @@ func startIntegrationCluster(t *testing.T, ctx context.Context) integrationClust
 	imageTag := fmt.Sprintf("integration-%d", time.Now().UnixNano())
 	imageName := "elkgo-integration:" + imageTag
 	nodeURLs := make([]string, 0, integrationClusterNodes)
+	nodeContainers := make([]*testcontainers.DockerContainer, 0, integrationClusterNodes)
 
 	for i := 1; i <= integrationClusterNodes; i++ {
 		alias := fmt.Sprintf("elkgo%d", i)
@@ -209,11 +211,13 @@ func startIntegrationCluster(t *testing.T, ctx context.Context) integrationClust
 			t.Fatalf("get endpoint for %s: %v", nodeID, err)
 		}
 		nodeURLs = append(nodeURLs, baseURL)
+		nodeContainers = append(nodeContainers, node)
 	}
 
 	return integrationCluster{
 		coordinatorURL: nodeURLs[0],
 		nodeURLs:       nodeURLs,
+		nodeContainers: nodeContainers,
 		imageName:      imageName,
 		networkName:    net.Name,
 	}

@@ -64,14 +64,18 @@ func materializeShardSnapshot(idx bleve.Index, destDir string) error {
 	return nil
 }
 
-func writeShardSnapshotArchive(idx bleve.Index, archivePath string) error {
+func (s *Server) writeShardSnapshotArchive(indexName, day string, shardID int, idx bleve.Index, archivePath string) error {
 	tempDir, err := os.MkdirTemp(filepath.Dir(archivePath), "shard-snapshot-materialized-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tempDir)
 
-	if err := materializeShardSnapshot(idx, tempDir); err != nil {
+	tempIndexPath := filepath.Join(tempDir, filepath.Base(s.shardIndexPath(indexName, day, shardID)))
+	if err := materializeShardSnapshot(idx, tempIndexPath); err != nil {
+		return err
+	}
+	if err := s.copyShardSourceSegments(indexName, day, shardID, tempDir); err != nil {
 		return err
 	}
 	return zipDirectory(tempDir, archivePath)
@@ -90,6 +94,42 @@ func copyIndexMetadataToDirectory(indexPath string, dir bleveindex.Directory) er
 	defer writer.Close()
 	_, err = writer.Write(metaBytes)
 	return err
+}
+
+func copyFile(srcPath, dstPath string) error {
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+		return err
+	}
+
+	dst, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(dst, src)
+	closeErr := dst.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
+}
+
+func (s *Server) copyShardSourceSegments(indexName, day string, shardID int, destDir string) error {
+	paths, err := s.shardSourceSegmentPaths(indexName, day, shardID)
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		if err := copyFile(path, filepath.Join(destDir, filepath.Base(path))); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func zipDirectory(srcDir, archivePath string) error {
@@ -188,15 +228,14 @@ func (s *Server) restoreShardSnapshotFromURL(ctx context.Context, route RoutingE
 		return false, err
 	}
 
-	tempIndexPath := filepath.Join(tempDir, filepath.Base(livePath))
-	if err := extractSnapshotArchive(tempArchivePath, tempIndexPath); err != nil {
+	if err := extractSnapshotArchive(tempArchivePath, tempDir); err != nil {
 		return false, err
 	}
 
 	if s.localShardExists(route.IndexName, route.Day, route.ShardID) {
 		return false, nil
 	}
-	if err := os.Rename(tempIndexPath, livePath); err != nil {
+	if err := s.installExtractedShardSnapshot(route.IndexName, route.Day, route.ShardID, tempDir, false); err != nil {
 		if s.localShardExists(route.IndexName, route.Day, route.ShardID) {
 			return false, nil
 		}
@@ -231,23 +270,47 @@ func (s *Server) installShardSnapshot(indexName, day string, shardID int, archiv
 		return err
 	}
 
-	tempIndexPath := filepath.Join(tempDir, filepath.Base(livePath))
-	if err := extractSnapshotArchive(tempArchivePath, tempIndexPath); err != nil {
+	if err := extractSnapshotArchive(tempArchivePath, tempDir); err != nil {
 		return err
 	}
 
+	return s.installExtractedShardSnapshot(indexName, day, shardID, tempDir, replaceExisting)
+}
+
+func (s *Server) installExtractedShardSnapshot(indexName, day string, shardID int, extractedDir string, replaceExisting bool) error {
+	livePath := s.shardIndexPath(indexName, day, shardID)
+	parentDir := filepath.Dir(livePath)
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		return err
+	}
+
+	lock := s.shardWriteLock(indexName, day, shardID)
+	lock.Lock()
+	defer lock.Unlock()
+
 	if replaceExisting {
-		if err := s.closeCachedShardIndex(indexName, day, shardID); err != nil {
-			return err
-		}
-		if err := os.RemoveAll(livePath); err != nil {
+		if err := s.removeLocalShardFiles(indexName, day, shardID); err != nil {
 			return err
 		}
 	} else if s.localShardExists(indexName, day, shardID) {
 		return nil
 	}
 
-	return os.Rename(tempIndexPath, livePath)
+	extractedWalPaths, err := extractedShardSourcePaths(extractedDir, shardID)
+	if err != nil {
+		return err
+	}
+	for _, walPath := range extractedWalPaths {
+		if err := os.Rename(walPath, filepath.Join(parentDir, filepath.Base(walPath))); err != nil {
+			return err
+		}
+	}
+
+	extractedIndexPath := filepath.Join(extractedDir, filepath.Base(livePath))
+	if _, err := os.Stat(extractedIndexPath); err != nil {
+		return err
+	}
+	return os.Rename(extractedIndexPath, livePath)
 }
 
 func (s *Server) transferShardSnapshotToReplica(ctx context.Context, route RoutingEntry, nodeID string) error {
@@ -271,7 +334,7 @@ func (s *Server) transferShardSnapshotToReplica(ctx context.Context, route Routi
 	}
 	defer os.Remove(archivePath)
 
-	if err := writeShardSnapshotArchive(idx, archivePath); err != nil {
+	if err := s.writeShardSnapshotArchive(route.IndexName, route.Day, route.ShardID, idx, archivePath); err != nil {
 		return err
 	}
 

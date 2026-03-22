@@ -6,15 +6,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
 	maxBulkErrors         = 20
 	bulkIngestConcurrency = 8
+	routeRetryAttempts    = 5
+	routeRetryDelay       = 100 * time.Millisecond
 )
 
 type bulkPreparedItem struct {
@@ -182,6 +188,32 @@ func (s *Server) ingestPreparedBulk(ctx context.Context, prepared []bulkPrepared
 }
 
 func (s *Server) ingestBulkShardGroup(ctx context.Context, group bulkShardGroup) error {
+	var lastErr error
+	for attempt := 0; attempt < routeRetryAttempts; attempt++ {
+		route, err := s.currentRouteForShard(group.indexName, group.day, group.shardID, group.route)
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = s.ingestBulkShardGroupOnce(ctx, group, route)
+			if lastErr == nil {
+				return nil
+			}
+		}
+
+		if !shouldRetryRouteError(lastErr) || attempt == routeRetryAttempts-1 {
+			return lastErr
+		}
+		if !sleepWithContext(ctx, routeRetryDelay) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return lastErr
+		}
+	}
+	return lastErr
+}
+
+func (s *Server) ingestBulkShardGroupOnce(ctx context.Context, group bulkShardGroup, route RoutingEntry) error {
 	req := internalIndexBatchRequest{
 		IndexName: group.indexName,
 		Day:       group.day,
@@ -193,9 +225,9 @@ func (s *Server) ingestBulkShardGroup(ctx context.Context, group bulkShardGroup)
 		req.Items[i] = item.item
 	}
 
-	primary := group.route.Replicas[0]
+	primary := route.Replicas[0]
 	if primary == s.nodeID {
-		status, resp, err := s.indexBatchOnPrimary(ctx, group.indexName, group.day, group.shardID, group.route, req.Items)
+		status, resp, err := s.indexBatchOnPrimary(ctx, group.indexName, group.day, group.shardID, route, req.Items)
 		if err != nil {
 			return err
 		}
@@ -291,6 +323,10 @@ func (s *Server) handleInternalIndexBatch(w http.ResponseWriter, r *http.Request
 		http.Error(w, "replica not assigned to this node", http.StatusForbidden)
 		return
 	}
+	if !req.Repair && !s.shardReadyForReplicaTraffic(req.IndexName, req.Day, req.ShardID) {
+		http.Error(w, "replica syncing", http.StatusServiceUnavailable)
+		return
+	}
 	if err := s.indexBatchLocal(req.IndexName, req.Day, req.ShardID, req.Items); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -310,31 +346,55 @@ func (s *Server) indexSingleDocument(ctx context.Context, indexName, day string,
 		Doc:   doc,
 	}}
 
-	primary := route.Replicas[0]
-	if primary == s.nodeID {
-		return s.indexBatchOnPrimary(ctx, indexName, day, shardID, route, items)
-	}
+	lastStatus := http.StatusServiceUnavailable
+	var lastResp internalIndexBatchResponse
+	var lastErr error
 
-	primaryAddr, ok := s.memberAddr(primary)
-	if !ok {
-		return http.StatusServiceUnavailable, internalIndexBatchResponse{}, errors.New("primary not registered")
-	}
+	for attempt := 0; attempt < routeRetryAttempts; attempt++ {
+		currentRoute, err := s.currentRouteForShard(indexName, day, shardID, route)
+		if err != nil {
+			lastErr = err
+			lastStatus = http.StatusServiceUnavailable
+		} else {
+			primary := currentRoute.Replicas[0]
+			if primary == s.nodeID {
+				return s.indexBatchOnPrimary(ctx, indexName, day, shardID, currentRoute, items)
+			}
 
-	var resp internalIndexBatchResponse
-	status, err := s.postJSONStatus(ctx, primaryAddr+"/internal/index_batch", internalIndexBatchRequest{
-		IndexName: indexName,
-		Day:       day,
-		ShardID:   shardID,
-		Items:     items,
-		Replicate: true,
-	}, &resp)
-	if err != nil {
-		if status == 0 {
-			status = http.StatusServiceUnavailable
+			primaryAddr, ok := s.memberAddr(primary)
+			if !ok {
+				lastErr = errors.New("primary not registered")
+				lastStatus = http.StatusServiceUnavailable
+			} else {
+				lastResp = internalIndexBatchResponse{}
+				lastStatus, lastErr = s.postJSONStatus(ctx, primaryAddr+"/internal/index_batch", internalIndexBatchRequest{
+					IndexName: indexName,
+					Day:       day,
+					ShardID:   shardID,
+					Items:     items,
+					Replicate: true,
+				}, &lastResp)
+				if lastErr == nil {
+					return lastStatus, lastResp, nil
+				}
+				if lastStatus == 0 {
+					lastStatus = http.StatusServiceUnavailable
+				}
+			}
 		}
-		return status, resp, err
+
+		if !shouldRetryRouteError(lastErr) || attempt == routeRetryAttempts-1 {
+			break
+		}
+		if !sleepWithContext(ctx, routeRetryDelay) {
+			if err := ctx.Err(); err != nil {
+				return http.StatusServiceUnavailable, lastResp, err
+			}
+			break
+		}
 	}
-	return status, resp, nil
+
+	return lastStatus, lastResp, lastErr
 }
 
 func singleDocumentResponse(docID string, resp internalIndexBatchResponse) map[string]any {
@@ -443,22 +503,60 @@ func (s *Server) indexBatchLocal(indexName, day string, shardID int, items []int
 		return nil
 	}
 
+	lock := s.shardWriteLock(indexName, day, shardID)
+	lock.Lock()
+	defer lock.Unlock()
+
 	idx, err := s.openShardIndex(indexName, day, shardID)
 	if err != nil {
 		return err
 	}
 
+	sourcePath := s.shardSourceSegmentPath(indexName, day, shardID, currentSourceSegment)
+	if err := os.MkdirAll(filepath.Dir(sourcePath), 0o755); err != nil {
+		return err
+	}
+	sourceFile, err := os.OpenFile(sourcePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	offset, err := sourceFile.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+	bufferedSource := bufio.NewWriter(sourceFile)
+
 	batch := idx.NewBatch()
 	for _, item := range items {
-		docID, doc, err := materializeBatchItem(item, day)
+		docID, doc, raw, err := materializeBatchItemSource(item, day)
 		if err != nil {
 			return err
 		}
+		compressed := compressSourceRecord(raw)
+		pointer := sourcePointer{
+			Segment:          currentSourceSegment,
+			Offset:           offset,
+			CompressedLength: uint64(len(compressed)),
+			RawLength:        uint64(len(raw)),
+		}
+		if err := writeSourceRecord(bufferedSource, raw, compressed); err != nil {
+			return err
+		}
+		offset += sourceRecordHeaderSize + int64(len(compressed))
+		addSourcePointerFields(doc, pointer)
 		if err := batch.Index(docID, doc); err != nil {
 			return err
 		}
 	}
 
+	if err := bufferedSource.Flush(); err != nil {
+		return err
+	}
+	if err := sourceFile.Sync(); err != nil {
+		return err
+	}
 	return idx.Batch(batch)
 }
 
@@ -487,6 +585,26 @@ func materializeBatchItem(item internalIndexBatchItem, day string) (string, Docu
 		docID = normalizedDocID
 	}
 	return docID, doc, nil
+}
+
+func (s *Server) currentRouteForShard(indexName, day string, shardID int, fallback RoutingEntry) (RoutingEntry, error) {
+	if route, ok := s.getRouting(indexName, day, shardID); ok && len(route.Replicas) > 0 {
+		return route, nil
+	}
+	if len(fallback.Replicas) > 0 {
+		return fallback, nil
+	}
+	return RoutingEntry{}, errors.New("routing not initialized for shard")
+}
+
+func shouldRetryRouteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "primary not assigned") ||
+		strings.Contains(message, "primary not registered") ||
+		strings.Contains(message, "routing not initialized for shard")
 }
 
 func appendBulkError(errorsOut *[]string, message string) {

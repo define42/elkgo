@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -161,6 +160,40 @@ func TestHandleInternalIndexDumpAndStreamDocs(t *testing.T) {
 	}
 }
 
+func TestSearchHelpersAndAdmission(t *testing.T) {
+	if got := effectiveSearchShardConcurrency(0); got != 1 {
+		t.Fatalf("expected zero targets to clamp concurrency to 1, got %d", got)
+	}
+	if got := effectiveSearchShardConcurrency(2); got != 2 {
+		t.Fatalf("expected small target count to cap concurrency, got %d", got)
+	}
+
+	if got := compareSearchRefs(searchHitRef{DocID: "same", Score: 1}, searchHitRef{DocID: "same", Score: 1}); got != 0 {
+		t.Fatalf("expected identical refs to compare equal, got %d", got)
+	}
+
+	heapItems := searchHitMinHeap{
+		{DocID: "z", Score: 1},
+		{DocID: "a", Score: 1},
+	}
+	if !heapItems.Less(0, 1) {
+		t.Fatalf("expected tie on score to treat lexicographically larger doc id as smaller heap item")
+	}
+
+	s := &Server{searchAdmission: make(chan struct{}, 1)}
+	if !s.tryAcquireSearchAdmission() {
+		t.Fatalf("expected first search admission acquire to succeed")
+	}
+	if s.tryAcquireSearchAdmission() {
+		t.Fatalf("expected second search admission acquire to fail when channel is full")
+	}
+	s.releaseSearchAdmission()
+	if !s.tryAcquireSearchAdmission() {
+		t.Fatalf("expected search admission to become available after release")
+	}
+	s.releaseSearchAdmission()
+}
+
 func TestServerHelpersAndTransport(t *testing.T) {
 	if got := publicAddrFromListen(":8081"); got != "http://127.0.0.1:8081" {
 		t.Fatalf("unexpected public addr from listen: %q", got)
@@ -240,16 +273,6 @@ func TestServerHelpersAndTransport(t *testing.T) {
 	}
 	if got := formatBulkGroupError(group, http.ErrHandlerTimeout); !strings.Contains(got, "lines 10-12") {
 		t.Fatalf("unexpected bulk group error formatting: %q", got)
-	}
-
-	nested := normalizeBleveField(map[string]interface{}{
-		"meta": []interface{}{map[string]interface{}{"service": "api"}},
-	})
-	wantNested := map[string]interface{}{
-		"meta": []interface{}{map[string]interface{}{"service": "api"}},
-	}
-	if !reflect.DeepEqual(nested, wantNested) {
-		t.Fatalf("unexpected normalized bleve field: %#v", nested)
 	}
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

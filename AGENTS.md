@@ -38,6 +38,10 @@ The repository also includes:
 
 - Data is partitioned by UTC day.
 - Shard placement is coordinated through etcd.
+- All ingested data must remain indexed. Do not change the system to index only a subset of ingested fields unless the task explicitly changes that product requirement.
+- The product must not require a predefined schema for ingest.
+- The system must support dynamically structured JSON documents.
+- Users must be able to search across all ingested fields.
 - Searches use `day_from` and `day_to`; do not reintroduce a standalone `day` search parameter.
 - Search supports all indexes. Treat `_all`, `*`, `all`, or omitted `index` consistently if touching the search path.
 - Search is performance-sensitive and currently uses a two-phase flow:

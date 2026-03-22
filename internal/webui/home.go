@@ -696,12 +696,12 @@ const HomePageHTML = `<!DOCTYPE html>
         <h1>Search the cluster without leaving the browser.</h1>
         <p>
           This page is a thin UI over the existing <code>/search</code> API. Fill in an index,
-          pick a day or a day range, run your query, and inspect the matching documents below.
+          pick a day range, run your query, and inspect the matching documents below.
         </p>
       </article>
       <aside class="card sidebar">
         <h2>Quick notes</h2>
-        <p>Use <strong>day</strong> for a single partition, or leave it empty and provide both <strong>day from</strong> and <strong>day to</strong>.</p>
+        <p>Use <strong>day from</strong> and <strong>day to</strong>. For a single partition, set them to the same date.</p>
         <p>The page keeps your inputs in the URL, so refreshing or sharing the search state is easy.</p>
         <p><a href="/admin/routing" target="_blank" rel="noreferrer">View routing JSON</a></p>
       </aside>
@@ -710,15 +710,11 @@ const HomePageHTML = `<!DOCTYPE html>
     <section class="card panel">
       <form id="search-form">
         <div class="grid">
-          <label class="span-4">
+          <label class="span-8">
             <span>Index</span>
             <select id="index" name="index" required>
               <option value="">Loading indexes...</option>
             </select>
-          </label>
-          <label class="span-4">
-            <span>Day</span>
-            <input id="day" name="day" type="date">
           </label>
           <label class="span-4">
             <span>Top K</span>
@@ -741,7 +737,7 @@ const HomePageHTML = `<!DOCTYPE html>
           <button type="submit">Search cluster</button>
           <button type="button" class="secondary" id="reset-btn">Reset</button>
           <a href="/cluster">Cluster dashboard</a>
-          <div class="hint">The UI calls <code>/search</code>. Leave query empty to list all documents for the selected day or range.</div>
+          <div class="hint">The UI calls <code>/search</code>. Leave query empty to list all documents for the selected range.</div>
         </div>
         <div id="index-catalog" class="hint">Loading available indexes...</div>
         <div id="status" class="status" aria-live="polite"></div>
@@ -774,7 +770,6 @@ const HomePageHTML = `<!DOCTYPE html>
     const fields = {
       index: document.getElementById("index"),
       q: document.getElementById("q"),
-      day: document.getElementById("day"),
       day_from: document.getElementById("day_from"),
       day_to: document.getElementById("day_to"),
       k: document.getElementById("k")
@@ -1346,12 +1341,14 @@ const HomePageHTML = `<!DOCTYPE html>
     }
 
     function applySuggestedDay() {
-      if (fields.day.value || fields.day_from.value || fields.day_to.value) return;
+      if (fields.day_from.value || fields.day_to.value) return;
       const match = availableIndexes.find(function (entry) {
         return entry.name === fields.index.value;
       });
       if (!match || !Array.isArray(match.days) || match.days.length === 0) return;
-      fields.day.value = match.days[match.days.length - 1];
+      const latestDay = match.days[match.days.length - 1];
+      fields.day_from.value = latestDay;
+      fields.day_to.value = latestDay;
     }
 
     function renderAvailableIndexes(indexes) {
@@ -1478,7 +1475,6 @@ const HomePageHTML = `<!DOCTYPE html>
       initialParams.get("index") &&
       (
         initialParams.get("q") ||
-        initialParams.get("day") ||
         (initialParams.get("day_from") && initialParams.get("day_to"))
       )
     ) {

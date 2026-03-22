@@ -80,7 +80,7 @@ func TestHandleBulkIngest_PartialFailuresReturnMultiStatus(t *testing.T) {
 		t.Fatalf("expected missing route error, got %#v", payload.Errors)
 	}
 
-	searchResp, err := http.Get(ts.URL + "/search?index=events&day=" + day + "&k=10")
+	searchResp, err := http.Get(ts.URL + "/search?index=events&day_from=" + day + "&day_to=" + day + "&k=10")
 	if err != nil {
 		t.Fatalf("search after partial bulk failed: %v", err)
 	}

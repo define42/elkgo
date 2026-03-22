@@ -62,6 +62,14 @@ func TestHandleHealthAndStaticPages(t *testing.T) {
 		if tc.wantContains != "" && !strings.Contains(body, tc.wantContains) {
 			t.Fatalf("%s %s: expected body to contain %q, got %q", tc.method, tc.path, tc.wantContains, body)
 		}
+		if tc.path == "/" && tc.method == http.MethodGet {
+			if !strings.Contains(body, `id="day_from"`) || !strings.Contains(body, `id="day_to"`) {
+				t.Fatalf("%s %s: expected range date inputs in search form", tc.method, tc.path)
+			}
+			if strings.Contains(body, `id="day"`) {
+				t.Fatalf("%s %s: expected legacy single-day input to be removed", tc.method, tc.path)
+			}
+		}
 		if tc.path == "/cluster" && tc.method == http.MethodGet && !strings.Contains(body, "Index retention") {
 			t.Fatalf("%s %s: expected body to contain %q", tc.method, tc.path, "Index retention")
 		}

@@ -151,16 +151,10 @@ func buildBleveQuery(q string) query.Query {
 }
 
 func resolveSearchDays(r *http.Request) ([]string, error) {
-	if day := strings.TrimSpace(r.URL.Query().Get("day")); day != "" {
-		if _, err := time.Parse("2006-01-02", day); err != nil {
-			return nil, errors.New("invalid day (YYYY-MM-DD)")
-		}
-		return []string{day}, nil
-	}
 	from := strings.TrimSpace(r.URL.Query().Get("day_from"))
 	to := strings.TrimSpace(r.URL.Query().Get("day_to"))
 	if from == "" || to == "" {
-		return nil, errors.New("provide either day or both day_from and day_to")
+		return nil, errors.New("provide both day_from and day_to")
 	}
 	start, err := time.Parse("2006-01-02", from)
 	if err != nil {

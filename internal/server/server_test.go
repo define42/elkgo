@@ -87,6 +87,27 @@ func TestHandleSearch_BlankQueryAcrossDayRangeReturnsAllDocuments(t *testing.T) 
 	}
 }
 
+func TestHandleSearch_RequiresDayFromAndDayTo(t *testing.T) {
+	s, ts := newTestHTTPServer(t)
+
+	resp, err := http.Get(ts.URL + "/search?index=events&day_from=2026-03-21")
+	if err != nil {
+		t.Fatalf("search request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", resp.StatusCode)
+	}
+
+	body := readAllAndClose(t, resp)
+	if !strings.Contains(body, "provide both day_from and day_to") {
+		t.Fatalf("unexpected validation message: %q", body)
+	}
+
+	_ = s
+}
+
 func TestHandleBulkIngest_NDJSONIndexesDocuments(t *testing.T) {
 	s, ts := newTestHTTPServer(t)
 
@@ -127,7 +148,7 @@ func TestHandleBulkIngest_NDJSONIndexesDocuments(t *testing.T) {
 		t.Fatalf("expected no bulk errors, got %#v", bulkPayload.Errors)
 	}
 
-	searchResp, err := http.Get(ts.URL + "/search?index=events&day=" + url.QueryEscape(day) + "&k=10")
+	searchResp, err := http.Get(ts.URL + "/search?index=events&day_from=" + url.QueryEscape(day) + "&day_to=" + url.QueryEscape(day) + "&k=10")
 	if err != nil {
 		t.Fatalf("search request failed: %v", err)
 	}
@@ -359,7 +380,7 @@ func TestHandleSearch_CachesReplicaAfterFailover(t *testing.T) {
 
 	setTestRoute(s, "events", day, shardID, []string{"n2", "n3"})
 
-	searchURL := ts.URL + "/search?index=events&day=" + url.QueryEscape(day) + "&q=" + url.QueryEscape("cached") + "&k=10"
+	searchURL := ts.URL + "/search?index=events&day_from=" + url.QueryEscape(day) + "&day_to=" + url.QueryEscape(day) + "&q=" + url.QueryEscape("cached") + "&k=10"
 	for i := 0; i < 2; i++ {
 		resp, err := http.Get(searchURL)
 		if err != nil {
@@ -513,7 +534,7 @@ func TestHandleIndex_PartialReplicaFailureSkipsStaleReplicaUntilRepair(t *testin
 	}
 	primary.membersMu.Unlock()
 
-	searchResp, err := http.Get(primaryTS.URL + "/search?index=events&day=" + url.QueryEscape(day) + "&q=repair-token&k=10")
+	searchResp, err := http.Get(primaryTS.URL + "/search?index=events&day_from=" + url.QueryEscape(day) + "&day_to=" + url.QueryEscape(day) + "&q=repair-token&k=10")
 	if err != nil {
 		t.Fatalf("search request before repair failed: %v", err)
 	}
@@ -562,7 +583,7 @@ func TestHandleIndex_PartialReplicaFailureSkipsStaleReplicaUntilRepair(t *testin
 	}
 	primary.membersMu.Unlock()
 
-	searchResp, err = http.Get(primaryTS.URL + "/search?index=events&day=" + url.QueryEscape(day) + "&q=repair-token&k=10")
+	searchResp, err = http.Get(primaryTS.URL + "/search?index=events&day_from=" + url.QueryEscape(day) + "&day_to=" + url.QueryEscape(day) + "&q=repair-token&k=10")
 	if err != nil {
 		t.Fatalf("search request after repair failed: %v", err)
 	}
@@ -683,7 +704,7 @@ func TestHandleSearch_GenericNumericAndDateFields(t *testing.T) {
 		"service":     "worker",
 	})
 
-	numericResp, err := http.Get(ts.URL + "/search?index=events&day=" + url.QueryEscape(day) + "&q=" + url.QueryEscape("latency_ms:>=100") + "&k=10")
+	numericResp, err := http.Get(ts.URL + "/search?index=events&day_from=" + url.QueryEscape(day) + "&day_to=" + url.QueryEscape(day) + "&q=" + url.QueryEscape("latency_ms:>=100") + "&k=10")
 	if err != nil {
 		t.Fatalf("numeric search request failed: %v", err)
 	}
@@ -703,7 +724,7 @@ func TestHandleSearch_GenericNumericAndDateFields(t *testing.T) {
 		t.Fatalf("unexpected numeric search hits: %#v", numericPayload.Hits)
 	}
 
-	dateResp, err := http.Get(ts.URL + "/search?index=events&day=" + url.QueryEscape(day) + "&q=" + url.QueryEscape(`observed_at:>="2026-03-21T00:00:00Z"`) + "&k=10")
+	dateResp, err := http.Get(ts.URL + "/search?index=events&day_from=" + url.QueryEscape(day) + "&day_to=" + url.QueryEscape(day) + "&q=" + url.QueryEscape(`observed_at:>="2026-03-21T00:00:00Z"`) + "&k=10")
 	if err != nil {
 		t.Fatalf("date search request failed: %v", err)
 	}

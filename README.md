@@ -83,7 +83,6 @@ At a high level:
 The search page supports:
 
 - index selection
-- `day`
 - `day_from` and `day_to`
 - free-text Bleve query syntax
 - blank query for match-all
@@ -247,14 +246,15 @@ curl -XPOST 'http://127.0.0.1:8081/bulk?index=events' \
 ### Search
 
 ```http
-GET /search?index=events&day=2026-03-21&q=timeout&k=10
+GET /search?index=events&day_from=2026-03-21&day_to=2026-03-21&q=timeout&k=10
 GET /search?index=events&day_from=2026-03-15&day_to=2026-03-21&q=service:api
 ```
 
 Rules:
 
 - `index` is required
-- either `day` or both `day_from` and `day_to` are required
+- both `day_from` and `day_to` are required
+- for a single day search, set `day_from` and `day_to` to the same date
 - `q` may be empty for match-all
 - `k` defaults to `10`
 
@@ -310,37 +310,37 @@ That means the supported search syntax is Bleve query-string syntax.
 All documents for a day:
 
 ```bash
-curl 'http://127.0.0.1:8081/search?index=events&day=2026-03-21'
+curl 'http://127.0.0.1:8081/search?index=events&day_from=2026-03-21&day_to=2026-03-21'
 ```
 
 Phrase search:
 
 ```bash
-curl 'http://127.0.0.1:8081/search?index=events&day=2026-03-21&q=%22api%20timeout%22'
+curl 'http://127.0.0.1:8081/search?index=events&day_from=2026-03-21&day_to=2026-03-21&q=%22api%20timeout%22'
 ```
 
 Fielded search:
 
 ```bash
-curl 'http://127.0.0.1:8081/search?index=events&day=2026-03-21&q=service:api'
+curl 'http://127.0.0.1:8081/search?index=events&day_from=2026-03-21&day_to=2026-03-21&q=service:api'
 ```
 
 Required and excluded:
 
 ```bash
-curl 'http://127.0.0.1:8081/search?index=events&day=2026-03-21&q=%2Berror%20-debug'
+curl 'http://127.0.0.1:8081/search?index=events&day_from=2026-03-21&day_to=2026-03-21&q=%2Berror%20-debug'
 ```
 
 Numeric filter:
 
 ```bash
-curl 'http://127.0.0.1:8081/search?index=events&day=2026-03-21&q=latency_ms:%3E%3D100'
+curl 'http://127.0.0.1:8081/search?index=events&day_from=2026-03-21&day_to=2026-03-21&q=latency_ms:%3E%3D100'
 ```
 
 Date filter:
 
 ```bash
-curl 'http://127.0.0.1:8081/search?index=events&day=2026-03-21&q=observed_at:%3E%3D%222026-03-21T00:00:00Z%22'
+curl 'http://127.0.0.1:8081/search?index=events&day_from=2026-03-21&day_to=2026-03-21&q=observed_at:%3E%3D%222026-03-21T00:00:00Z%22'
 ```
 
 Across a day range:

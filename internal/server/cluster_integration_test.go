@@ -509,9 +509,10 @@ func validateTargetedSearch(t *testing.T, coordinatorURL string, dataset integra
 	t.Helper()
 
 	searchURL := fmt.Sprintf(
-		"%s/search?index=%s&day=%s&q=%s&k=10",
+		"%s/search?index=%s&day_from=%s&day_to=%s&q=%s&k=10",
 		coordinatorURL,
 		url.QueryEscape(integrationIndexName),
+		url.QueryEscape(dataset.TargetDay),
 		url.QueryEscape(dataset.TargetDay),
 		url.QueryEscape(dataset.TargetToken),
 	)

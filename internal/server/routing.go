@@ -265,6 +265,9 @@ func routeHasReplica(route RoutingEntry, nodeID string) bool {
 }
 
 func keyToShard(key string, numShards int) int {
+	if numShards <= 0 {
+		return 0
+	}
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(key))
 	return int(h.Sum32() % uint32(numShards))

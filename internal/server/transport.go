@@ -221,7 +221,7 @@ func newStreamingRequestBody(encode func(io.Writer) error, contentType string, c
 }
 
 func requestBodyReader(r *http.Request) (io.ReadCloser, error) {
-	if !strings.Contains(strings.ToLower(r.Header.Get("Content-Encoding")), "gzip") {
+	if strings.TrimSpace(strings.ToLower(r.Header.Get("Content-Encoding"))) != "gzip" {
 		return r.Body, nil
 	}
 	reader, err := gzip.NewReader(r.Body)

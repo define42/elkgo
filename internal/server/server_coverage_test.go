@@ -907,3 +907,52 @@ func TestInternalShardReadHandlers_ValidationAndAvailability(t *testing.T) {
 		resp.Body.Close()
 	}
 }
+
+func TestKeyToShard_ZeroShards(t *testing.T) {
+	// keyToShard must not panic when numShards is 0.
+	got := keyToShard("some-key", 0)
+	if got != 0 {
+		t.Fatalf("expected 0 for 0 shards, got %d", got)
+	}
+}
+
+func TestKeyToShard_NegativeShards(t *testing.T) {
+	got := keyToShard("some-key", -1)
+	if got != 0 {
+		t.Fatalf("expected 0 for negative shards, got %d", got)
+	}
+}
+
+func TestKeyToShard_Deterministic(t *testing.T) {
+	a := keyToShard("doc-123", 48)
+	b := keyToShard("doc-123", 48)
+	if a != b {
+		t.Fatalf("expected deterministic shard, got %d and %d", a, b)
+	}
+	if a < 0 || a >= 48 {
+		t.Fatalf("shard out of range: %d", a)
+	}
+}
+
+func TestRequestBodyReader_NonGzipEncodings(t *testing.T) {
+	// Verify that non-exact gzip content-encoding values are not treated as gzip.
+	for _, encoding := range []string{"", "identity", "deflate", "br", "not-gzip"} {
+		r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"hello":"world"}`))
+		if encoding != "" {
+			r.Header.Set("Content-Encoding", encoding)
+		}
+		reader, err := requestBodyReader(r)
+		if err != nil {
+			t.Fatalf("encoding %q: unexpected error: %v", encoding, err)
+		}
+		defer reader.Close()
+		// Should return the raw body unchanged.
+		body, err := io.ReadAll(reader)
+		if err != nil {
+			t.Fatalf("encoding %q: read error: %v", encoding, err)
+		}
+		if !strings.Contains(string(body), "hello") {
+			t.Fatalf("encoding %q: expected raw body, got %q", encoding, body)
+		}
+	}
+}

@@ -439,7 +439,7 @@ func TestSearchHelpers_FailoverAndValidation(t *testing.T) {
 			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 		}
 
-		refs, err := coordinator.searchShardRefs(context.Background(), target, "failover search", 5)
+		refs, err := coordinator.searchShardRefs(context.Background(), target, "failover search", nil, nil, 5)
 		if err != nil {
 			t.Fatalf("searchShardRefs failover failed: %v", err)
 		}

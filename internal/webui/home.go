@@ -214,6 +214,10 @@ const HomePageHTML = `<!DOCTYPE html>
       max-width: none;
     }
 
+    .hidden {
+      display: none !important;
+    }
+
     .query-box {
       display: flex;
       align-items: center;
@@ -257,6 +261,244 @@ const HomePageHTML = `<!DOCTYPE html>
     .query-box:focus-within {
       border-color: var(--accent-strong);
       background: var(--panel-strong);
+    }
+
+    .timebox-shell {
+      position: relative;
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .timebox-control {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 0;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius);
+      background: var(--panel);
+      overflow: hidden;
+    }
+
+    .timebox-trigger,
+    .timebox-dates-btn {
+      min-height: 58px;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      color: var(--text);
+      box-shadow: none;
+    }
+
+    .timebox-trigger {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 12px 16px;
+      border-right: 1px solid var(--line);
+      text-align: left;
+    }
+
+    .timebox-trigger:hover,
+    .timebox-dates-btn:hover {
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .timebox-trigger-main {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .timebox-trigger-copy {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .timebox-value {
+      font-size: 1.02rem;
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .timebox-caption {
+      color: var(--muted);
+      font-size: 0.8rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .timebox-calendar {
+      width: 22px;
+      height: 22px;
+      border: 2px solid var(--accent-strong);
+      border-radius: 4px;
+      position: relative;
+      flex: 0 0 auto;
+    }
+
+    .timebox-calendar::before,
+    .timebox-calendar::after {
+      content: "";
+      position: absolute;
+      background: var(--accent-strong);
+    }
+
+    .timebox-calendar::before {
+      left: 3px;
+      right: 3px;
+      top: 6px;
+      height: 2px;
+    }
+
+    .timebox-calendar::after {
+      width: 10px;
+      height: 2px;
+      left: 4px;
+      top: -4px;
+      box-shadow: 8px 0 0 var(--accent-strong);
+    }
+
+    .timebox-caret {
+      width: 12px;
+      height: 12px;
+      border-right: 2px solid var(--accent-strong);
+      border-bottom: 2px solid var(--accent-strong);
+      transform: rotate(45deg) translateY(-2px);
+      flex: 0 0 auto;
+    }
+
+    .timebox-dates-btn {
+      padding: 12px 18px;
+      color: #72b6ff;
+      font-size: 0.95rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .timebox-popover {
+      position: absolute;
+      top: calc(100% + 16px);
+      left: 0;
+      z-index: 15;
+      width: min(100%, 860px);
+      padding: 22px 24px 24px;
+      border-radius: 10px;
+      border: 1px solid var(--line-strong);
+      background: #1f2128;
+      box-shadow: 0 18px 36px rgba(0, 0, 0, 0.42);
+    }
+
+    .timebox-popover-arrow {
+      position: absolute;
+      top: -10px;
+      left: 42px;
+      width: 20px;
+      height: 20px;
+      background: #1f2128;
+      border-top: 1px solid var(--line-strong);
+      border-left: 1px solid var(--line-strong);
+      transform: rotate(45deg);
+    }
+
+    .timebox-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    .timebox-title,
+    .timebox-section-title {
+      font-size: 0.98rem;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .timebox-section-title {
+      margin-bottom: 14px;
+    }
+
+    .timebox-row {
+      display: grid;
+      grid-template-columns: minmax(140px, 1fr) minmax(120px, 1fr) minmax(160px, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 20px;
+    }
+
+    .timebox-row select,
+    .timebox-row input,
+    .timebox-date-grid input {
+      min-height: 56px;
+      font-size: 1rem;
+    }
+
+    .timebox-row button {
+      min-height: 56px;
+      min-width: 120px;
+      font-size: 1rem;
+    }
+
+    .timebox-presets {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 28px;
+    }
+
+    .timebox-preset {
+      appearance: none;
+      border: 0;
+      padding: 0;
+      background: transparent;
+      color: #72b6ff;
+      font-size: 0.98rem;
+      font-weight: 500;
+      text-align: left;
+      box-shadow: none;
+    }
+
+    .timebox-preset:hover {
+      color: #a6d4ff;
+      background: transparent;
+    }
+
+    .timebox-preset.active {
+      color: var(--text);
+    }
+
+    .timebox-date-panel {
+      display: grid;
+      gap: 14px;
+      margin-top: 20px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+    }
+
+    .timebox-date-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .timebox-date-grid label {
+      gap: 8px;
+    }
+
+    .timebox-date-note {
+      color: var(--muted);
+      font-size: 0.8rem;
     }
 
     select {
@@ -881,6 +1123,23 @@ const HomePageHTML = `<!DOCTYPE html>
         grid-column: span 12;
       }
 
+      .timebox-control,
+      .timebox-row,
+      .timebox-date-grid,
+      .timebox-presets {
+        grid-template-columns: 1fr;
+      }
+
+      .timebox-dates-btn,
+      .timebox-row button {
+        width: 100%;
+      }
+
+      .timebox-popover {
+        width: 100%;
+        left: 0;
+      }
+
       .menu-link {
         min-height: 40px;
       }
@@ -967,15 +1226,76 @@ const HomePageHTML = `<!DOCTYPE html>
             <span>Top K</span>
             <input id="k" name="k" class="input-compact" type="number" min="1" max="1000" value="100">
           </label>
-          <label class="span-3">
-            <span>Day From</span>
-            <input id="day_from" name="day_from" type="date">
-          </label>
-          <label class="span-3">
-            <span>Day To</span>
-            <input id="day_to" name="day_to" type="date">
-          </label>
+          <div class="timebox-shell span-6">
+            <span>Time range</span>
+            <div class="timebox-control">
+              <button type="button" id="timebox-trigger" class="timebox-trigger" aria-expanded="false" aria-controls="timebox-popover">
+                <span class="timebox-trigger-main">
+                  <span class="timebox-calendar" aria-hidden="true"></span>
+                  <span class="timebox-trigger-copy">
+                    <span id="timebox-label" class="timebox-value">Last 15 minutes</span>
+                    <span id="timebox-caption" class="timebox-caption">UTC window will update when you apply it.</span>
+                  </span>
+                </span>
+                <span class="timebox-caret" aria-hidden="true"></span>
+              </button>
+              <button type="button" id="timebox-dates-btn" class="timebox-dates-btn">Show dates</button>
+            </div>
+            <div id="timebox-popover" class="timebox-popover hidden">
+              <div class="timebox-popover-arrow" aria-hidden="true"></div>
+              <div class="timebox-header">
+                <div class="timebox-title">Quick select</div>
+              </div>
+              <div class="timebox-row">
+                <select id="timebox-mode">
+                  <option value="last">Last</option>
+                </select>
+                <input id="timebox-amount" type="number" min="1" step="1" value="15">
+                <select id="timebox-unit">
+                  <option value="minutes">minutes</option>
+                  <option value="hours">hours</option>
+                  <option value="days">days</option>
+                  <option value="weeks">weeks</option>
+                </select>
+                <button type="button" id="timebox-apply-btn">Apply</button>
+              </div>
+              <div class="timebox-section">
+                <div class="timebox-section-title">Commonly used</div>
+                <div class="timebox-presets">
+                  <button type="button" class="timebox-preset" data-timebox-preset="today">Today</button>
+                  <button type="button" class="timebox-preset" data-timebox-preset="last-15-minutes">Last 15 minutes</button>
+                  <button type="button" class="timebox-preset" data-timebox-preset="today-so-far">Today so far</button>
+                  <button type="button" class="timebox-preset" data-timebox-preset="last-30-minutes">Last 30 minutes</button>
+                  <button type="button" class="timebox-preset" data-timebox-preset="yesterday">Yesterday</button>
+                  <button type="button" class="timebox-preset" data-timebox-preset="last-1-hour">Last 1 hour</button>
+                  <button type="button" class="timebox-preset" data-timebox-preset="day-before-yesterday">Day before yesterday</button>
+                  <button type="button" class="timebox-preset" data-timebox-preset="last-4-hours">Last 4 hours</button>
+                  <button type="button" class="timebox-preset" data-timebox-preset="this-week">This week</button>
+                  <button type="button" class="timebox-preset" data-timebox-preset="last-week">Last week</button>
+                  <button type="button" class="timebox-preset" data-timebox-preset="last-12-hours">Last 12 hours</button>
+                </div>
+              </div>
+              <div id="timebox-date-panel" class="timebox-date-panel hidden">
+                <div class="timebox-section-title">Exact dates</div>
+                <div class="timebox-date-grid">
+                  <label>
+                    <span>From</span>
+                    <input id="timebox-date-from" type="datetime-local">
+                  </label>
+                  <label>
+                    <span>To</span>
+                    <input id="timebox-date-to" type="datetime-local">
+                  </label>
+                </div>
+                <div class="timebox-date-note">Exact timestamp filters are applied in UTC, while the inputs follow your local browser time.</div>
+              </div>
+            </div>
+          </div>
         </div>
+        <input id="day_from" name="day_from" type="hidden">
+        <input id="day_to" name="day_to" type="hidden">
+        <input id="time_from" name="time_from" type="hidden">
+        <input id="time_to" name="time_to" type="hidden">
         <div class="actions">
           <button type="submit">Refresh</button>
           <button type="button" class="secondary" id="reset-btn">Reset</button>
@@ -1011,8 +1331,32 @@ const HomePageHTML = `<!DOCTYPE html>
       q: document.getElementById("q"),
       day_from: document.getElementById("day_from"),
       day_to: document.getElementById("day_to"),
+      time_from: document.getElementById("time_from"),
+      time_to: document.getElementById("time_to"),
       k: document.getElementById("k")
     };
+
+    const timeboxEls = {
+      trigger: document.getElementById("timebox-trigger"),
+      label: document.getElementById("timebox-label"),
+      caption: document.getElementById("timebox-caption"),
+      datesBtn: document.getElementById("timebox-dates-btn"),
+      popover: document.getElementById("timebox-popover"),
+      mode: document.getElementById("timebox-mode"),
+      amount: document.getElementById("timebox-amount"),
+      unit: document.getElementById("timebox-unit"),
+      applyBtn: document.getElementById("timebox-apply-btn"),
+      datePanel: document.getElementById("timebox-date-panel"),
+      dateFrom: document.getElementById("timebox-date-from"),
+      dateTo: document.getElementById("timebox-date-to"),
+      presets: Array.from(document.querySelectorAll("[data-timebox-preset]"))
+    };
+
+    const DEFAULT_TIMEBOX = Object.freeze({ kind: "relative", amount: 15, unit: "minutes" });
+    let appliedTimebox = cloneTimebox(DEFAULT_TIMEBOX);
+    let draftTimebox = cloneTimebox(DEFAULT_TIMEBOX);
+    let timeboxDatesVisible = false;
+    let timeboxCustomDirty = false;
 
     function setStatus(message, isError) {
       statusEl.textContent = message || "";
@@ -1021,6 +1365,348 @@ const HomePageHTML = `<!DOCTYPE html>
 
     function setHitCount(message) {
       hitCountEl.textContent = message || "Discover ready";
+    }
+
+    function normalizeTimeboxUnit(unit) {
+      switch (String(unit || "").toLowerCase()) {
+        case "hours":
+        case "days":
+        case "weeks":
+          return String(unit).toLowerCase();
+        default:
+          return "minutes";
+      }
+    }
+
+    function cloneTimebox(state) {
+      if (!state || typeof state !== "object") {
+        return { kind: "relative", amount: 15, unit: "minutes" };
+      }
+      if (state.kind === "named") {
+        return { kind: "named", preset: String(state.preset || "today") };
+      }
+      if (state.kind === "custom") {
+        return { kind: "custom", from: String(state.from || ""), to: String(state.to || "") };
+      }
+      return {
+        kind: "relative",
+        amount: Math.max(1, Math.floor(Number(state.amount) || 15)),
+        unit: normalizeTimeboxUnit(state.unit)
+      };
+    }
+
+    function padDatePart(value) {
+      return String(value).padStart(2, "0");
+    }
+
+    function formatDayValue(date) {
+      return date.toISOString().slice(0, 10);
+    }
+
+    function isValidDate(value) {
+      return value instanceof Date && !Number.isNaN(value.getTime());
+    }
+
+    function startOfUTCDay(date) {
+      return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 0, 0, 0, 0));
+    }
+
+    function endOfUTCDay(date) {
+      return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 23, 59, 59, 999));
+    }
+
+    function startOfUTCWeek(date) {
+      const start = startOfUTCDay(date);
+      const weekday = start.getUTCDay();
+      const offset = weekday === 0 ? 6 : weekday - 1;
+      start.setUTCDate(start.getUTCDate() - offset);
+      return start;
+    }
+
+    function shiftUTC(date, amount, unit) {
+      const shifted = new Date(date.getTime());
+      switch (unit) {
+        case "hours":
+          shifted.setUTCHours(shifted.getUTCHours() + amount);
+          break;
+        case "days":
+          shifted.setUTCDate(shifted.getUTCDate() + amount);
+          break;
+        case "weeks":
+          shifted.setUTCDate(shifted.getUTCDate() + (amount * 7));
+          break;
+        default:
+          shifted.setUTCMinutes(shifted.getUTCMinutes() + amount);
+          break;
+      }
+      return shifted;
+    }
+
+    function relativeTimeboxLabel(amount, unit) {
+      const baseUnit = amount === 1 ? unit.replace(/s$/, "") : unit;
+      return "Last " + amount + " " + baseUnit;
+    }
+
+    function presetTimeboxState(preset) {
+      switch (preset) {
+        case "today":
+        case "today-so-far":
+        case "yesterday":
+        case "day-before-yesterday":
+        case "this-week":
+        case "last-week":
+          return { kind: "named", preset: preset };
+        case "last-30-minutes":
+          return { kind: "relative", amount: 30, unit: "minutes" };
+        case "last-1-hour":
+          return { kind: "relative", amount: 1, unit: "hours" };
+        case "last-4-hours":
+          return { kind: "relative", amount: 4, unit: "hours" };
+        case "last-12-hours":
+          return { kind: "relative", amount: 12, unit: "hours" };
+        case "last-15-minutes":
+        default:
+          return { kind: "relative", amount: 15, unit: "minutes" };
+      }
+    }
+
+    function timeboxPresetKey(state) {
+      const normalized = cloneTimebox(state);
+      if (normalized.kind === "named") {
+        return normalized.preset;
+      }
+      if (normalized.kind === "relative") {
+        if (normalized.amount === 15 && normalized.unit === "minutes") return "last-15-minutes";
+        if (normalized.amount === 30 && normalized.unit === "minutes") return "last-30-minutes";
+        if (normalized.amount === 1 && normalized.unit === "hours") return "last-1-hour";
+        if (normalized.amount === 4 && normalized.unit === "hours") return "last-4-hours";
+        if (normalized.amount === 12 && normalized.unit === "hours") return "last-12-hours";
+      }
+      return "";
+    }
+
+    function computeTimeboxWindow(state) {
+      const normalized = cloneTimebox(state);
+      const now = new Date();
+
+      if (normalized.kind === "named") {
+        switch (normalized.preset) {
+          case "today": {
+            const start = startOfUTCDay(now);
+            return { start: start, end: endOfUTCDay(now), label: "Today" };
+          }
+          case "today-so-far": {
+            return { start: startOfUTCDay(now), end: now, label: "Today so far" };
+          }
+          case "yesterday": {
+            const yesterday = shiftUTC(startOfUTCDay(now), -1, "days");
+            return { start: startOfUTCDay(yesterday), end: endOfUTCDay(yesterday), label: "Yesterday" };
+          }
+          case "day-before-yesterday": {
+            const previous = shiftUTC(startOfUTCDay(now), -2, "days");
+            return { start: startOfUTCDay(previous), end: endOfUTCDay(previous), label: "Day before yesterday" };
+          }
+          case "last-week": {
+            const currentWeekStart = startOfUTCWeek(now);
+            const lastWeekStart = shiftUTC(currentWeekStart, -1, "weeks");
+            const lastWeekEnd = new Date(currentWeekStart.getTime() - 1);
+            return { start: lastWeekStart, end: lastWeekEnd, label: "Last week" };
+          }
+          case "this-week":
+          default:
+            return { start: startOfUTCWeek(now), end: now, label: "This week" };
+        }
+      }
+
+      if (normalized.kind === "custom") {
+        const start = new Date(normalized.from);
+        const end = new Date(normalized.to);
+        if (isValidDate(start) && isValidDate(end) && end >= start) {
+          return { start: start, end: end, label: "Custom range" };
+        }
+      }
+
+      const end = now;
+      const start = shiftUTC(end, -normalized.amount, normalized.unit);
+      return { start: start, end: end, label: relativeTimeboxLabel(normalized.amount, normalized.unit) };
+    }
+
+    function formatTimeboxInstant(date) {
+      return date.toLocaleString([], {
+        timeZone: "UTC",
+        year: "numeric",
+        month: "short",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit"
+      }).replace(",", "") + " UTC";
+    }
+
+    function formatTimeboxCaption(window) {
+      return formatTimeboxInstant(window.start) + " -> " + formatTimeboxInstant(window.end);
+    }
+
+    function toLocalDateTimeInputValue(date) {
+      if (!isValidDate(date)) return "";
+      return [
+        date.getFullYear(),
+        padDatePart(date.getMonth() + 1),
+        padDatePart(date.getDate())
+      ].join("-") + "T" + [
+        padDatePart(date.getHours()),
+        padDatePart(date.getMinutes())
+      ].join(":");
+    }
+
+    function appendTimeboxParams(params) {
+      const state = cloneTimebox(appliedTimebox);
+      params.set("timebox_kind", state.kind);
+      if (state.kind === "relative") {
+        params.set("timebox_amount", String(state.amount));
+        params.set("timebox_unit", state.unit);
+        return;
+      }
+      if (state.kind === "named") {
+        params.set("timebox_preset", state.preset);
+      }
+    }
+
+    function deriveTimeboxFromParams(params) {
+      const kind = params.get("timebox_kind");
+      if (kind === "relative") {
+        return {
+          kind: "relative",
+          amount: Math.max(1, Math.floor(Number(params.get("timebox_amount")) || 15)),
+          unit: normalizeTimeboxUnit(params.get("timebox_unit"))
+        };
+      }
+      if (kind === "named") {
+        return { kind: "named", preset: String(params.get("timebox_preset") || "today") };
+      }
+      if (kind === "custom") {
+        return {
+          kind: "custom",
+          from: String(params.get("time_from") || ""),
+          to: String(params.get("time_to") || "")
+        };
+      }
+
+      const timeFrom = params.get("time_from");
+      const timeTo = params.get("time_to");
+      if (timeFrom && timeTo) {
+        return { kind: "custom", from: timeFrom, to: timeTo };
+      }
+
+      const dayFrom = params.get("day_from");
+      const dayTo = params.get("day_to");
+      if (dayFrom && dayTo) {
+        return {
+          kind: "custom",
+          from: dayFrom + "T00:00:00Z",
+          to: dayTo + "T23:59:59Z"
+        };
+      }
+
+      return cloneTimebox(DEFAULT_TIMEBOX);
+    }
+
+    function syncTimeboxControls() {
+      const state = cloneTimebox(draftTimebox);
+      if (state.kind === "relative") {
+        timeboxEls.mode.value = "last";
+        timeboxEls.amount.value = String(state.amount);
+        timeboxEls.unit.value = state.unit;
+      }
+
+      if (timeboxDatesVisible) {
+        const preview = computeTimeboxWindow(state);
+        timeboxEls.dateFrom.value = state.kind === "custom" ? toLocalDateTimeInputValue(new Date(state.from)) : toLocalDateTimeInputValue(preview.start);
+        timeboxEls.dateTo.value = state.kind === "custom" ? toLocalDateTimeInputValue(new Date(state.to)) : toLocalDateTimeInputValue(preview.end);
+      }
+
+      const presetKey = timeboxPresetKey(state);
+      timeboxEls.presets.forEach(function (button) {
+        button.classList.toggle("active", button.dataset.timeboxPreset === presetKey);
+      });
+    }
+
+    function setTimeboxDatesVisible(visible) {
+      timeboxDatesVisible = !!visible;
+      timeboxEls.datePanel.classList.toggle("hidden", !timeboxDatesVisible);
+      timeboxEls.datesBtn.textContent = timeboxDatesVisible ? "Hide dates" : "Show dates";
+      if (timeboxDatesVisible) {
+        timeboxCustomDirty = draftTimebox.kind === "custom";
+        syncTimeboxControls();
+        return;
+      }
+      timeboxCustomDirty = false;
+    }
+
+    function syncSearchWindowFromTimebox() {
+      const window = computeTimeboxWindow(appliedTimebox);
+      fields.day_from.value = formatDayValue(window.start);
+      fields.day_to.value = formatDayValue(window.end);
+      fields.time_from.value = window.start.toISOString();
+      fields.time_to.value = window.end.toISOString();
+      timeboxEls.label.textContent = window.label;
+      timeboxEls.caption.textContent = formatTimeboxCaption(window);
+      return window;
+    }
+
+    function applyTimeboxState(state) {
+      appliedTimebox = cloneTimebox(state);
+      draftTimebox = cloneTimebox(state);
+      syncSearchWindowFromTimebox();
+      syncTimeboxControls();
+    }
+
+    function openTimeboxPopover(showDates) {
+      draftTimebox = cloneTimebox(appliedTimebox);
+      timeboxEls.popover.classList.remove("hidden");
+      timeboxEls.trigger.setAttribute("aria-expanded", "true");
+      if (typeof showDates === "boolean") {
+        setTimeboxDatesVisible(showDates);
+      } else {
+        setTimeboxDatesVisible(timeboxDatesVisible);
+      }
+      syncTimeboxControls();
+    }
+
+    function closeTimeboxPopover() {
+      timeboxEls.popover.classList.add("hidden");
+      timeboxEls.trigger.setAttribute("aria-expanded", "false");
+    }
+
+    function customTimeboxFromInputs() {
+      const rawFrom = String(timeboxEls.dateFrom.value || "").trim();
+      const rawTo = String(timeboxEls.dateTo.value || "").trim();
+      if (rawFrom === "" && rawTo === "") return null;
+      if (rawFrom === "" || rawTo === "") {
+        throw new Error("Provide both exact dates before applying.");
+      }
+
+      const start = new Date(rawFrom);
+      const end = new Date(rawTo);
+      if (!isValidDate(start) || !isValidDate(end)) {
+        throw new Error("Invalid exact date selection.");
+      }
+      if (end < start) {
+        throw new Error("The end date must be after the start date.");
+      }
+      return { kind: "custom", from: start.toISOString(), to: end.toISOString() };
+    }
+
+    function applyTimeboxSelection() {
+      try {
+        const useCustom = timeboxDatesVisible && (timeboxCustomDirty || draftTimebox.kind === "custom");
+        const custom = useCustom ? customTimeboxFromInputs() : null;
+        applyTimeboxState(custom || draftTimebox);
+        closeTimeboxPopover();
+        currentOffset = 0;
+        runSearch(true);
+      } catch (error) {
+        setStatus(error.message || "Could not apply the selected time range.", true);
+      }
     }
 
     const TIMESTAMP_FIELDS = ["@timestamp", "timestamp", "event_time", "created", "created_at", "observed_at", "time"];
@@ -1760,6 +2446,7 @@ const HomePageHTML = `<!DOCTYPE html>
       summaryEl.innerHTML = "";
       const hits = Array.isArray(data.hits) ? data.hits.length : 0;
       const indexLabel = !data.index || data.index === "_all" ? "all indexes" : data.index;
+      const timeboxWindow = computeTimeboxWindow(appliedTimebox);
       setHitCount(hits + " hit" + (hits === 1 ? "" : "s"));
       pendingIndexValue = data.index || "_all";
       if (fields.index.querySelector('option[value="' + pendingIndexValue + '"]')) {
@@ -1768,6 +2455,7 @@ const HomePageHTML = `<!DOCTYPE html>
 
       const pills = [
         indexLabel,
+        timeboxWindow.label,
         Array.isArray(data.days) && data.days.length > 0 ? data.days.join(" -> ") : "",
         "top " + data.k
       ];
@@ -1820,6 +2508,7 @@ const HomePageHTML = `<!DOCTYPE html>
     }
 
     function paramsFromForm() {
+      syncSearchWindowFromTimebox();
       const params = new URLSearchParams();
       Object.keys(fields).forEach(function (key) {
         const value = key === "index" && !fields[key].value.trim()
@@ -1827,6 +2516,7 @@ const HomePageHTML = `<!DOCTYPE html>
           : fields[key].value.trim();
         if (value !== "") params.set(key, value);
       });
+      appendTimeboxParams(params);
       if (currentOffset > 0) {
         params.set("from", String(currentOffset));
       }
@@ -1845,29 +2535,7 @@ const HomePageHTML = `<!DOCTYPE html>
       const rawFrom = params.get("from");
       const parsedFrom = rawFrom ? Number(rawFrom) : 0;
       currentOffset = Number.isFinite(parsedFrom) && parsedFrom > 0 ? Math.floor(parsedFrom) : 0;
-    }
-
-    function applySuggestedDay() {
-      if (fields.day_from.value || fields.day_to.value) return;
-      let latestDay = "";
-      if (fields.index.value && fields.index.value !== "_all") {
-        const match = availableIndexes.find(function (entry) {
-          return entry.name === fields.index.value;
-        });
-        if (!match || !Array.isArray(match.days) || match.days.length === 0) return;
-        latestDay = match.days[match.days.length - 1];
-      } else {
-        availableIndexes.forEach(function (entry) {
-          if (!Array.isArray(entry.days) || entry.days.length === 0) return;
-          const candidate = entry.days[entry.days.length - 1];
-          if (!latestDay || candidate > latestDay) {
-            latestDay = candidate;
-          }
-        });
-        if (!latestDay) return;
-      }
-      fields.day_from.value = latestDay;
-      fields.day_to.value = latestDay;
+      applyTimeboxState(deriveTimeboxFromParams(params));
     }
 
     function renderAvailableIndexes(indexes) {
@@ -1912,7 +2580,6 @@ const HomePageHTML = `<!DOCTYPE html>
         fields.index.value = availableIndexes[0].name;
       }
       pendingIndexValue = "";
-      applySuggestedDay();
     }
 
     async function loadAvailableIndexes() {
@@ -1977,10 +2644,80 @@ const HomePageHTML = `<!DOCTYPE html>
       runSearch(true);
     });
 
+    timeboxEls.trigger.addEventListener("click", function () {
+      if (timeboxEls.popover.classList.contains("hidden")) {
+        openTimeboxPopover(false);
+        return;
+      }
+      closeTimeboxPopover();
+    });
+
+    timeboxEls.datesBtn.addEventListener("click", function () {
+      if (timeboxEls.popover.classList.contains("hidden")) {
+        openTimeboxPopover(true);
+        return;
+      }
+      setTimeboxDatesVisible(!timeboxDatesVisible);
+    });
+
+    timeboxEls.amount.addEventListener("input", function () {
+      draftTimebox = {
+        kind: "relative",
+        amount: Math.max(1, Math.floor(Number(timeboxEls.amount.value) || 1)),
+        unit: normalizeTimeboxUnit(timeboxEls.unit.value)
+      };
+      timeboxCustomDirty = false;
+      syncTimeboxControls();
+    });
+
+    timeboxEls.unit.addEventListener("change", function () {
+      draftTimebox = {
+        kind: "relative",
+        amount: Math.max(1, Math.floor(Number(timeboxEls.amount.value) || 1)),
+        unit: normalizeTimeboxUnit(timeboxEls.unit.value)
+      };
+      timeboxCustomDirty = false;
+      syncTimeboxControls();
+    });
+
+    timeboxEls.dateFrom.addEventListener("input", function () {
+      timeboxCustomDirty = true;
+    });
+
+    timeboxEls.dateTo.addEventListener("input", function () {
+      timeboxCustomDirty = true;
+    });
+
+    timeboxEls.applyBtn.addEventListener("click", applyTimeboxSelection);
+
+    timeboxEls.presets.forEach(function (button) {
+      button.addEventListener("click", function () {
+        draftTimebox = presetTimeboxState(button.dataset.timeboxPreset);
+        timeboxCustomDirty = false;
+        syncTimeboxControls();
+      });
+    });
+
+    document.addEventListener("click", function (event) {
+      const target = event.target;
+      if (timeboxEls.popover.classList.contains("hidden")) return;
+      if (timeboxEls.popover.contains(target) || timeboxEls.trigger.contains(target) || timeboxEls.datesBtn.contains(target)) return;
+      closeTimeboxPopover();
+    });
+
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") {
+        closeTimeboxPopover();
+      }
+    });
+
     resetBtn.addEventListener("click", function () {
       Object.keys(fields).forEach(function (key) {
         fields[key].value = key === "k" ? DEFAULT_TOP_K : "";
       });
+      applyTimeboxState(DEFAULT_TIMEBOX);
+      closeTimeboxPopover();
+      setTimeboxDatesVisible(false);
       currentOffset = 0;
       summaryEl.innerHTML = "";
       errorsEl.innerHTML = "";
@@ -1990,19 +2727,19 @@ const HomePageHTML = `<!DOCTYPE html>
       window.history.replaceState({}, "", "/");
     });
 
-    fields.index.addEventListener("change", applySuggestedDay);
-
     const initialParams = new URLSearchParams(window.location.search);
     applyParams(initialParams);
     resultsEl.innerHTML = "";
     setHitCount("Discover ready");
+    setTimeboxDatesVisible(false);
     loadAvailableIndexes();
 
     if (
       initialParams.get("index") &&
       (
         initialParams.get("q") ||
-        (initialParams.get("day_from") && initialParams.get("day_to"))
+        (initialParams.get("day_from") && initialParams.get("day_to")) ||
+        (initialParams.get("time_from") && initialParams.get("time_to"))
       )
     ) {
       runSearch(false);

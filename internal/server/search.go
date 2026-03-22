@@ -23,6 +23,8 @@ const (
 	maxSearchOffset               = 10000
 )
 
+var searchTimeFieldCandidates = []string{"@timestamp", "timestamp", "event_time", "created", "created_at", "observed_at", "time", "ts"}
+
 type searchHitRef struct {
 	Target RoutingEntry
 	DocID  string
@@ -85,13 +87,31 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	timeFrom, timeTo, hasTimeRange, err := resolveSearchTimeRange(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	targets := s.collectSearchTargets(indexName, days)
 	if len(targets) == 0 {
-		http.Error(w, "routing not initialized for requested index/day range", http.StatusServiceUnavailable)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"index":          searchIndexLabel(indexName),
+			"indexes":        []string{},
+			"days":           days,
+			"query":          q,
+			"k":              k,
+			"from":           from,
+			"time_from":      formatSearchTime(timeFrom, hasTimeRange),
+			"time_to":        formatSearchTime(timeTo, hasTimeRange),
+			"has_more":       false,
+			"hits":           []ShardHit{},
+			"partial_errors": []string{},
+			"shards_per_day": s.defaultShardsPerDay,
+		})
 		return
 	}
 
-	refs, partial := s.collectTopSearchRefs(r.Context(), targets, q, from+k+1)
+	refs, partial := s.collectTopSearchRefs(r.Context(), targets, q, optionalTimePointer(timeFrom, hasTimeRange), optionalTimePointer(timeTo, hasTimeRange), from+k+1)
 	hasMore := len(refs) > from+k
 	pageEnd := from + k
 	if from >= len(refs) {
@@ -112,6 +132,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		"query":          q,
 		"k":              k,
 		"from":           from,
+		"time_from":      formatSearchTime(timeFrom, hasTimeRange),
+		"time_to":        formatSearchTime(timeTo, hasTimeRange),
 		"has_more":       hasMore,
 		"hits":           hits,
 		"partial_errors": partial,
@@ -119,7 +141,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) collectTopSearchRefs(ctx context.Context, targets []RoutingEntry, q string, k int) ([]searchHitRef, []string) {
+func (s *Server) collectTopSearchRefs(ctx context.Context, targets []RoutingEntry, q string, timeFrom, timeTo *time.Time, k int) ([]searchHitRef, []string) {
 	type result struct {
 		refs []searchHitRef
 		err  error
@@ -137,7 +159,7 @@ func (s *Server) collectTopSearchRefs(ctx context.Context, targets []RoutingEntr
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			refs, err := s.searchShardRefs(ctx, target, q, k)
+			refs, err := s.searchShardRefs(ctx, target, q, timeFrom, timeTo, k)
 			results <- result{refs: refs, err: err}
 		}()
 	}
@@ -174,7 +196,7 @@ func (s *Server) collectTopSearchRefs(ctx context.Context, targets []RoutingEntr
 	return out, partial
 }
 
-func (s *Server) searchShardRefs(ctx context.Context, target RoutingEntry, q string, k int) ([]searchHitRef, error) {
+func (s *Server) searchShardRefs(ctx context.Context, target RoutingEntry, q string, timeFrom, timeTo *time.Time, k int) ([]searchHitRef, error) {
 	tried := make(map[string]struct{}, len(target.Replicas))
 	errorsOut := make([]string, 0, len(target.Replicas))
 	routeKey := routingMapKey(target.IndexName, target.Day, target.ShardID)
@@ -195,6 +217,8 @@ func (s *Server) searchShardRefs(ctx context.Context, target RoutingEntry, q str
 			Day:       target.Day,
 			ShardID:   target.ShardID,
 			Query:     q,
+			TimeFrom:  formatSearchTimePointer(timeFrom),
+			TimeTo:    formatSearchTimePointer(timeTo),
 			K:         k * 2,
 			FetchDocs: false,
 		}, &resp)
@@ -366,6 +390,14 @@ func (s *Server) handleSearchShard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	searchReq := bleve.NewSearchRequestOptions(buildBleveQuery(req.Query), req.K, 0, false)
+	if req.TimeFrom != "" || req.TimeTo != "" {
+		timeFrom, timeTo, hasTimeRange, err := resolveSearchTimeRangeValues(req.TimeFrom, req.TimeTo)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		searchReq = bleve.NewSearchRequestOptions(buildBleveQueryWithTimeRange(req.Query, optionalTimePointer(timeFrom, hasTimeRange), optionalTimePointer(timeTo, hasTimeRange)), req.K, 0, false)
+	}
 	searchResult, err := idx.Search(searchReq)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -437,11 +469,42 @@ func (s *Server) handleFetchDocs(w http.ResponseWriter, r *http.Request) {
 }
 
 func buildBleveQuery(q string) query.Query {
+	return buildBleveQueryWithTimeRange(q, nil, nil)
+}
+
+func buildBleveQueryWithTimeRange(q string, timeFrom, timeTo *time.Time) query.Query {
 	q = strings.TrimSpace(q)
-	if q == "" {
-		return bleve.NewMatchAllQuery()
+
+	parts := make([]query.Query, 0, 2)
+	if q != "" {
+		parts = append(parts, bleve.NewQueryStringQuery(q))
 	}
-	return bleve.NewQueryStringQuery(q)
+	if timeQuery := buildSearchTimeRangeQuery(timeFrom, timeTo); timeQuery != nil {
+		parts = append(parts, timeQuery)
+	}
+
+	switch len(parts) {
+	case 0:
+		return bleve.NewMatchAllQuery()
+	case 1:
+		return parts[0]
+	default:
+		return query.NewConjunctionQuery(parts)
+	}
+}
+
+func buildSearchTimeRangeQuery(timeFrom, timeTo *time.Time) query.Query {
+	if timeFrom == nil && timeTo == nil {
+		return nil
+	}
+
+	disjuncts := make([]query.Query, 0, len(searchTimeFieldCandidates))
+	for _, field := range searchTimeFieldCandidates {
+		rangeQuery := bleve.NewDateRangeQuery(derefSearchTime(timeFrom), derefSearchTime(timeTo))
+		rangeQuery.SetField(field)
+		disjuncts = append(disjuncts, rangeQuery)
+	}
+	return query.NewDisjunctionQuery(disjuncts)
 }
 
 func resolveSearchDays(r *http.Request) ([]string, error) {
@@ -466,6 +529,64 @@ func resolveSearchDays(r *http.Request) ([]string, error) {
 		days = append(days, d.Format("2006-01-02"))
 	}
 	return days, nil
+}
+
+func resolveSearchTimeRange(r *http.Request) (time.Time, time.Time, bool, error) {
+	return resolveSearchTimeRangeValues(r.URL.Query().Get("time_from"), r.URL.Query().Get("time_to"))
+}
+
+func resolveSearchTimeRangeValues(rawFrom, rawTo string) (time.Time, time.Time, bool, error) {
+	rawFrom = strings.TrimSpace(rawFrom)
+	rawTo = strings.TrimSpace(rawTo)
+	if rawFrom == "" && rawTo == "" {
+		return time.Time{}, time.Time{}, false, nil
+	}
+	if rawFrom == "" || rawTo == "" {
+		return time.Time{}, time.Time{}, false, errors.New("provide both time_from and time_to")
+	}
+
+	start, err := time.Parse(time.RFC3339Nano, rawFrom)
+	if err != nil {
+		return time.Time{}, time.Time{}, false, errors.New("invalid time_from")
+	}
+	end, err := time.Parse(time.RFC3339Nano, rawTo)
+	if err != nil {
+		return time.Time{}, time.Time{}, false, errors.New("invalid time_to")
+	}
+	start = start.UTC()
+	end = end.UTC()
+	if end.Before(start) {
+		return time.Time{}, time.Time{}, false, errors.New("time_to must be >= time_from")
+	}
+	return start, end, true, nil
+}
+
+func optionalTimePointer(value time.Time, enabled bool) *time.Time {
+	if !enabled {
+		return nil
+	}
+	return &value
+}
+
+func derefSearchTime(value *time.Time) time.Time {
+	if value == nil {
+		return time.Time{}
+	}
+	return value.UTC()
+}
+
+func formatSearchTime(value time.Time, enabled bool) string {
+	if !enabled {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
+func formatSearchTimePointer(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339)
 }
 
 func effectiveSearchShardConcurrency(targetCount int) int {

@@ -80,6 +80,8 @@ type SearchShardRequest struct {
 	Day       string `json:"day"`
 	ShardID   int    `json:"shard_id"`
 	Query     string `json:"query"`
+	TimeFrom  string `json:"time_from,omitempty"`
+	TimeTo    string `json:"time_to,omitempty"`
 	K         int    `json:"k"`
 	FetchDocs bool   `json:"fetch_docs,omitempty"`
 }

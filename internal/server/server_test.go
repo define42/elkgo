@@ -111,6 +111,84 @@ func TestHandleSearch_RequiresDayFromAndDayTo(t *testing.T) {
 	_ = s
 }
 
+func TestHandleSearch_UnroutedDayRangeReturnsEmptyResults(t *testing.T) {
+	s, ts := newTestHTTPServer(t)
+
+	availableDay := "2026-03-21"
+	setTestRoute(s, "events", availableDay, 0, []string{"n1"})
+	indexTestDocument(t, s, "events", availableDay, 0, "doc-1", Document{
+		"id":        "doc-1",
+		"timestamp": availableDay + "T10:00:00Z",
+		"message":   "available day",
+	})
+
+	dayFrom := "2026-03-09"
+	dayTo := "2026-03-15"
+	searchURL := fmt.Sprintf("%s/search?index=events&day_from=%s&day_to=%s&time_from=%s&time_to=%s&k=100",
+		ts.URL,
+		url.QueryEscape(dayFrom),
+		url.QueryEscape(dayTo),
+		url.QueryEscape(dayFrom+"T00:00:00Z"),
+		url.QueryEscape(dayTo+"T23:59:59Z"),
+	)
+	resp, err := http.Get(searchURL)
+	if err != nil {
+		t.Fatalf("search request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		Index         string     `json:"index"`
+		Indexes       []string   `json:"indexes"`
+		Days          []string   `json:"days"`
+		TimeFrom      string     `json:"time_from"`
+		TimeTo        string     `json:"time_to"`
+		K             int        `json:"k"`
+		From          int        `json:"from"`
+		HasMore       bool       `json:"has_more"`
+		Hits          []ShardHit `json:"hits"`
+		PartialErrors []string   `json:"partial_errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if payload.Index != "events" {
+		t.Fatalf("expected index events, got %q", payload.Index)
+	}
+	if len(payload.Indexes) != 0 {
+		t.Fatalf("expected no matching indexes, got %#v", payload.Indexes)
+	}
+	if len(payload.Days) != 7 || payload.Days[0] != dayFrom || payload.Days[len(payload.Days)-1] != dayTo {
+		t.Fatalf("unexpected days: %#v", payload.Days)
+	}
+	if payload.TimeFrom != dayFrom+"T00:00:00Z" {
+		t.Fatalf("expected time_from to round-trip, got %q", payload.TimeFrom)
+	}
+	if payload.TimeTo != dayTo+"T23:59:59Z" {
+		t.Fatalf("expected time_to to round-trip, got %q", payload.TimeTo)
+	}
+	if payload.K != 100 {
+		t.Fatalf("expected k=100, got %d", payload.K)
+	}
+	if payload.From != 0 {
+		t.Fatalf("expected from=0, got %d", payload.From)
+	}
+	if payload.HasMore {
+		t.Fatalf("expected has_more=false")
+	}
+	if len(payload.Hits) != 0 {
+		t.Fatalf("expected no hits, got %d", len(payload.Hits))
+	}
+	if len(payload.PartialErrors) != 0 {
+		t.Fatalf("expected no partial errors, got %#v", payload.PartialErrors)
+	}
+}
+
 func TestHandleSearch_AllIndexesScope(t *testing.T) {
 	s, ts := newTestHTTPServer(t)
 
@@ -235,6 +313,68 @@ func TestHandleSearch_FromPagination(t *testing.T) {
 	checkPage(0, 2, []string{"doc-001", "doc-002"}, true)
 	checkPage(2, 2, []string{"doc-003", "doc-004"}, true)
 	checkPage(4, 2, []string{"doc-005"}, false)
+}
+
+func TestHandleSearch_TimeRangeFilter(t *testing.T) {
+	s, ts := newTestHTTPServer(t)
+
+	day := "2026-03-21"
+	setTestRoute(s, "events", day, 0, []string{"n1"})
+
+	indexTestDocument(t, s, "events", day, 0, "doc-early", Document{
+		"id":        "doc-early",
+		"timestamp": day + "T10:05:00Z",
+		"message":   "early event",
+	})
+	indexTestDocument(t, s, "events", day, 0, "doc-middle", Document{
+		"id":        "doc-middle",
+		"timestamp": day + "T10:20:00Z",
+		"message":   "middle event",
+	})
+	indexTestDocument(t, s, "events", day, 0, "doc-late", Document{
+		"id":        "doc-late",
+		"timestamp": day + "T10:50:00Z",
+		"message":   "late event",
+	})
+
+	searchURL := fmt.Sprintf("%s/search?index=events&day_from=%s&day_to=%s&time_from=%s&time_to=%s&k=10",
+		ts.URL,
+		url.QueryEscape(day),
+		url.QueryEscape(day),
+		url.QueryEscape(day+"T10:10:00Z"),
+		url.QueryEscape(day+"T10:40:00Z"),
+	)
+	resp, err := http.Get(searchURL)
+	if err != nil {
+		t.Fatalf("search request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		TimeFrom string     `json:"time_from"`
+		TimeTo   string     `json:"time_to"`
+		Hits     []ShardHit `json:"hits"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode time range response: %v", err)
+	}
+
+	if payload.TimeFrom != day+"T10:10:00Z" {
+		t.Fatalf("expected time_from to round-trip, got %q", payload.TimeFrom)
+	}
+	if payload.TimeTo != day+"T10:40:00Z" {
+		t.Fatalf("expected time_to to round-trip, got %q", payload.TimeTo)
+	}
+	if len(payload.Hits) != 1 {
+		t.Fatalf("expected 1 hit, got %d", len(payload.Hits))
+	}
+	if payload.Hits[0].DocID != "doc-middle" {
+		t.Fatalf("expected doc-middle, got %q", payload.Hits[0].DocID)
+	}
 }
 
 func TestHandleBulkIngest_NDJSONIndexesDocuments(t *testing.T) {

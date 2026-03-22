@@ -432,6 +432,9 @@ const HomePageHTML = `<!DOCTYPE html>
     .field-list {
       display: grid;
       gap: 2px;
+      max-height: min(52vh, 640px);
+      overflow-y: auto;
+      padding-right: 4px;
     }
 
     .field-item {
@@ -577,6 +580,7 @@ const HomePageHTML = `<!DOCTYPE html>
       text-transform: none;
       color: var(--text);
       font-weight: 700;
+      overflow-wrap: anywhere;
     }
 
     details.event-row {
@@ -707,27 +711,84 @@ const HomePageHTML = `<!DOCTYPE html>
       padding-top: 4px;
     }
 
-    .field-grid {
-      display: grid;
-      gap: 12px;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    .document-tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--line);
     }
 
-    .field-card {
-      padding: 12px 14px;
-      border-radius: var(--radius);
-      border: 1px solid var(--line);
+    .document-tab {
+      appearance: none;
+      border: 0;
+      border-right: 1px solid var(--line);
+      background: transparent;
+      color: var(--muted);
+      padding: 10px 16px;
+      font-size: 0.92rem;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: none;
+    }
+
+    .document-tab:last-child {
+      border-right: 0;
+    }
+
+    .document-tab.active {
       background: var(--panel);
-      min-width: 0;
+      color: var(--text);
     }
 
-    .field-value {
-      display: block;
-      margin-top: 8px;
+    .document-panel {
+      border: 1px solid var(--line);
+      border-top: 0;
+      background: var(--panel);
+    }
+
+    .document-panel.hidden {
+      display: none;
+    }
+
+    .document-field-table {
+      display: grid;
+    }
+
+    .document-field-row {
+      display: grid;
+      grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
+      border-top: 1px solid var(--line);
+    }
+
+    .document-field-row:first-child {
+      border-top: 0;
+    }
+
+    .document-field-name,
+    .document-field-value {
+      min-width: 0;
+      padding: 12px 14px;
+      font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+      font-size: 0.9rem;
+      line-height: 1.55;
+    }
+
+    .document-field-name {
+      color: var(--muted);
+      font-weight: 700;
+      border-right: 1px solid var(--line);
+      overflow-wrap: anywhere;
+    }
+
+    .document-field-value {
       color: var(--text);
-      font-size: 0.94rem;
-      line-height: 1.5;
+      white-space: pre-wrap;
       word-break: break-word;
+    }
+
+    .document-empty {
+      padding: 16px;
+      color: var(--muted);
+      font-size: 0.9rem;
     }
 
     pre {
@@ -741,6 +802,12 @@ const HomePageHTML = `<!DOCTYPE html>
       font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
       font-size: 0.9rem;
       line-height: 1.55;
+    }
+
+    .document-json {
+      border-radius: 0;
+      border: 0;
+      background: transparent;
     }
 
     .empty {
@@ -929,7 +996,9 @@ const HomePageHTML = `<!DOCTYPE html>
     const CHIP_FIELDS = ["level", "severity", "service", "host", "hostname", "env", "environment", "dataset", "source", "status"];
     const INLINE_HIDDEN_FIELDS = new Set(["id", "partition_day"].concat(TIMESTAMP_FIELDS));
     const SOURCE_PRIORITY_FIELDS = ["message", "event", "summary", "title", "request", "response", "status", "tags", "url", "path", "service", "host", "hostname", "clientip", "ip", "agent"];
-    const HIDDEN_FIELDS = new Set(["id", "partition_day"].concat(TIMESTAMP_FIELDS, SUMMARY_FIELDS));
+    const DEFAULT_PINNED_SKIP_FIELDS = new Set(["id", "partition_day"].concat(TIMESTAMP_FIELDS, SUMMARY_FIELDS));
+    const FIELD_PRIORITY_FIELDS = TIMESTAMP_FIELDS.concat(["id", "partition_day"], SUMMARY_FIELDS, SOURCE_PRIORITY_FIELDS);
+    const flatSourceCache = typeof WeakMap === "function" ? new WeakMap() : null;
 
     function isPlainObject(value) {
       return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -943,11 +1012,120 @@ const HomePageHTML = `<!DOCTYPE html>
       return Array.isArray(value) && value.length > 0 && value.length <= 6 && value.every(isScalar);
     }
 
+    function leafFieldName(field) {
+      const parts = String(field || "").split(".");
+      return parts[parts.length - 1] || String(field || "");
+    }
+
+    function fieldPriority(field) {
+      const exact = FIELD_PRIORITY_FIELDS.indexOf(field);
+      if (exact >= 0) return exact;
+      const leaf = FIELD_PRIORITY_FIELDS.indexOf(leafFieldName(field));
+      if (leaf >= 0) return FIELD_PRIORITY_FIELDS.length + leaf;
+      return FIELD_PRIORITY_FIELDS.length * 2;
+    }
+
+    function compareFieldKeys(a, b) {
+      const aPriority = fieldPriority(a);
+      const bPriority = fieldPriority(b);
+      if (aPriority !== bPriority) return aPriority - bPriority;
+      return a.localeCompare(b);
+    }
+
+    function mergeFlattenedValue(existing, incoming) {
+      const values = [];
+      const seen = new Set();
+
+      function append(value) {
+        if (value === undefined) return;
+        const marker = value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+          ? typeof value + ":" + String(value)
+          : JSON.stringify(value);
+        if (seen.has(marker)) return;
+        seen.add(marker);
+        values.push(value);
+      }
+
+      (Array.isArray(existing) ? existing : [existing]).forEach(append);
+      (Array.isArray(incoming) ? incoming : [incoming]).forEach(append);
+
+      if (values.length === 0) return undefined;
+      return values.length === 1 ? values[0] : values;
+    }
+
+    function flattenSourceFields(source) {
+      if (!isPlainObject(source)) return {};
+      if (flatSourceCache && flatSourceCache.has(source)) {
+        return flatSourceCache.get(source);
+      }
+
+      const flat = {};
+
+      function append(path, value) {
+        if (!path || value === undefined) return;
+        flat[path] = mergeFlattenedValue(flat[path], value);
+      }
+
+      function visit(value, path) {
+        if (isPlainObject(value)) {
+          Object.keys(value).sort(compareFieldKeys).forEach(function (key) {
+            visit(value[key], path ? path + "." + key : key);
+          });
+          return;
+        }
+
+        if (Array.isArray(value)) {
+          if (value.length === 0) {
+            append(path, []);
+            return;
+          }
+
+          const hasNestedItems = value.some(function (item) {
+            return isPlainObject(item) || Array.isArray(item);
+          });
+
+          if (!hasNestedItems) {
+            append(path, value);
+            return;
+          }
+
+          value.forEach(function (item) {
+            if (isPlainObject(item) || Array.isArray(item)) {
+              visit(item, path);
+              return;
+            }
+            append(path, item);
+          });
+          return;
+        }
+
+        append(path, value);
+      }
+
+      visit(source, "");
+      if (flatSourceCache) {
+        flatSourceCache.set(source, flat);
+      }
+      return flat;
+    }
+
+    function getFieldValue(source, field) {
+      const flat = flattenSourceFields(source);
+      if (Object.prototype.hasOwnProperty.call(flat, field)) {
+        return flat[field];
+      }
+      if (source && Object.prototype.hasOwnProperty.call(source, field)) {
+        return source[field];
+      }
+      return undefined;
+    }
+
     function firstPresentField(source, keys) {
       for (let i = 0; i < keys.length; i += 1) {
         const key = keys[i];
-        if (source && source[key] !== undefined && source[key] !== null && source[key] !== "") {
-          return source[key];
+        const value = getFieldValue(source, key);
+        if (value !== undefined && value !== null && value !== "") {
+          return value;
         }
       }
       return "";
@@ -1005,6 +1183,14 @@ const HomePageHTML = `<!DOCTYPE html>
       if (value === undefined) return "";
       if (typeof value === "string") return value;
       if (typeof value === "number" || typeof value === "boolean") return String(value);
+      if (Array.isArray(value) && value.length === 0) return "[]";
+      if (Array.isArray(value) && value.every(isScalar)) {
+        const preview = value.slice(0, 6).map(function (item) {
+          return item === null ? "null" : String(item);
+        });
+        if (value.length <= 6) return preview.join(" • ");
+        return preview.join(" • ") + " • +" + (value.length - 6) + " more";
+      }
       if (isCompactArray(value)) {
         return value.map(function (item) {
           return item === null ? "null" : String(item);
@@ -1019,27 +1205,24 @@ const HomePageHTML = `<!DOCTYPE html>
       return String(value);
     }
 
-    function topLevelFieldStats(hits) {
+    function flattenedFieldStats(hits) {
       const counts = {};
       hits.forEach(function (hit) {
         const source = isPlainObject(hit.source) ? hit.source : {};
-        Object.keys(source).forEach(function (key) {
-          if (HIDDEN_FIELDS.has(key)) return;
-          const value = source[key];
-          if (!isScalar(value) && !isCompactArray(value)) return;
+        Object.keys(flattenSourceFields(source)).forEach(function (key) {
           counts[key] = (counts[key] || 0) + 1;
         });
       });
       return Object.keys(counts).map(function (key) {
         return { key: key, count: counts[key] };
       }).sort(function (a, b) {
-        if (b.count === a.count) return a.key.localeCompare(b.key);
+        if (b.count === a.count) return compareFieldKeys(a.key, b.key);
         return b.count - a.count;
       });
     }
 
     function normalizeSelectedFields(hits) {
-      const stats = topLevelFieldStats(hits);
+      const stats = flattenedFieldStats(hits);
       const available = new Set(stats.map(function (entry) { return entry.key; }));
 
       selectedFields = selectedFields.filter(function (field) {
@@ -1051,6 +1234,7 @@ const HomePageHTML = `<!DOCTYPE html>
       stats.forEach(function (entry) {
         if (selectedFields.length >= 3) return;
         if (CHIP_FIELDS.indexOf(entry.key) >= 0) return;
+        if (DEFAULT_PINNED_SKIP_FIELDS.has(entry.key)) return;
         selectedFields.push(entry.key);
       });
     }
@@ -1065,45 +1249,21 @@ const HomePageHTML = `<!DOCTYPE html>
       return chips.slice(0, 5);
     }
 
-    function extractFieldCards(source) {
-      const cards = [];
-      const seen = new Set();
-
-      Object.keys(source || {}).sort().forEach(function (key) {
-        if (seen.has(key) || HIDDEN_FIELDS.has(key) || CHIP_FIELDS.indexOf(key) >= 0) return;
-        const value = source[key];
-        if (!isScalar(value) && !isCompactArray(value)) return;
-        cards.push({ key: key, value: displayValue(value) });
-        seen.add(key);
+    function documentFieldEntries(source) {
+      const flat = flattenSourceFields(source);
+      return Object.keys(flat).sort(compareFieldKeys).map(function (key) {
+        return { key: key, value: displayValue(flat[key]) };
       });
-
-      if (cards.length === 0) {
-        CHIP_FIELDS.forEach(function (key) {
-          if (!source || source[key] === undefined || source[key] === null || source[key] === "") return;
-          if (!isScalar(source[key]) && !isCompactArray(source[key])) return;
-          cards.push({ key: key, value: displayValue(source[key]) });
-        });
-      }
-
-      return cards.slice(0, 10);
     }
 
     function inlineSourcePairs(source) {
-      return Object.keys(source || {}).filter(function (key) {
+      const flat = flattenSourceFields(source);
+      return Object.keys(flat).filter(function (key) {
         if (INLINE_HIDDEN_FIELDS.has(key) || selectedFields.indexOf(key) >= 0) return false;
-        const value = source[key];
-        return isScalar(value) || isCompactArray(value);
-      }).sort(function (a, b) {
-        const aPriority = SOURCE_PRIORITY_FIELDS.indexOf(a);
-        const bPriority = SOURCE_PRIORITY_FIELDS.indexOf(b);
-        if (aPriority !== -1 || bPriority !== -1) {
-          if (aPriority === -1) return 1;
-          if (bPriority === -1) return -1;
-          if (aPriority !== bPriority) return aPriority - bPriority;
-        }
-        return a.localeCompare(b);
-      }).map(function (key) {
-        return { key: key, value: displayValue(source[key]) };
+        const value = flat[key];
+        return value !== undefined && value !== null && value !== "";
+      }).sort(compareFieldKeys).map(function (key) {
+        return { key: key, value: displayValue(flat[key]) };
       }).slice(0, 16);
     }
 
@@ -1153,16 +1313,16 @@ const HomePageHTML = `<!DOCTYPE html>
       availableSection.className = "sidebar-section";
       availableSection.innerHTML = '<div class="sidebar-title">Available fields</div>';
 
-      const stats = topLevelFieldStats(hits);
+      const stats = flattenedFieldStats(hits);
       if (stats.length === 0) {
         const empty = document.createElement("div");
         empty.className = "sidebar-empty";
-        empty.textContent = "No scalar top-level fields were found in the current result set.";
+        empty.textContent = "No flattened fields were found in the current result set.";
         availableSection.appendChild(empty);
       } else {
         const list = document.createElement("div");
         list.className = "field-list";
-        stats.slice(0, 18).forEach(function (entry) {
+        stats.forEach(function (entry) {
           const button = document.createElement("button");
           button.type = "button";
           button.className = "field-item" + (selectedFields.indexOf(entry.key) >= 0 ? " active" : "");
@@ -1322,6 +1482,79 @@ const HomePageHTML = `<!DOCTYPE html>
       return panel;
     }
 
+    function renderDocumentView(source) {
+      const wrapper = document.createElement("div");
+
+      const tabs = document.createElement("div");
+      tabs.className = "document-tabs";
+
+      const tableTab = document.createElement("button");
+      tableTab.type = "button";
+      tableTab.className = "document-tab active";
+      tableTab.textContent = "Table";
+      tabs.appendChild(tableTab);
+
+      const jsonTab = document.createElement("button");
+      jsonTab.type = "button";
+      jsonTab.className = "document-tab";
+      jsonTab.textContent = "JSON";
+      tabs.appendChild(jsonTab);
+
+      const tablePanel = document.createElement("div");
+      tablePanel.className = "document-panel";
+      const fieldTable = document.createElement("div");
+      fieldTable.className = "document-field-table";
+      const entries = documentFieldEntries(source);
+
+      if (entries.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "document-empty";
+        empty.textContent = "No fields were found in this document.";
+        fieldTable.appendChild(empty);
+      } else {
+        entries.forEach(function (entry) {
+          const row = document.createElement("div");
+          row.className = "document-field-row";
+
+          const name = document.createElement("div");
+          name.className = "document-field-name";
+          name.textContent = entry.key;
+          row.appendChild(name);
+
+          const value = document.createElement("div");
+          value.className = "document-field-value";
+          value.textContent = entry.value || "—";
+          row.appendChild(value);
+
+          fieldTable.appendChild(row);
+        });
+      }
+      tablePanel.appendChild(fieldTable);
+
+      const jsonPanel = document.createElement("div");
+      jsonPanel.className = "document-panel hidden";
+      const pre = document.createElement("pre");
+      pre.className = "document-json";
+      pre.textContent = JSON.stringify(source, null, 2);
+      jsonPanel.appendChild(pre);
+
+      function setView(view) {
+        const showingTable = view === "table";
+        tableTab.classList.toggle("active", showingTable);
+        jsonTab.classList.toggle("active", !showingTable);
+        tablePanel.classList.toggle("hidden", !showingTable);
+        jsonPanel.classList.toggle("hidden", showingTable);
+      }
+
+      tableTab.addEventListener("click", function () { setView("table"); });
+      jsonTab.addEventListener("click", function () { setView("json"); });
+
+      wrapper.appendChild(tabs);
+      wrapper.appendChild(tablePanel);
+      wrapper.appendChild(jsonPanel);
+      return wrapper;
+    }
+
     function renderEventTable(hits) {
       const panel = document.createElement("section");
       panel.className = "events-panel";
@@ -1407,7 +1640,7 @@ const HomePageHTML = `<!DOCTYPE html>
 
         selectedFields.forEach(function (field) {
           const detail = document.createElement("div");
-          const value = source[field];
+          const value = getFieldValue(source, field);
           detail.className = "detail-cell" + (value === undefined || value === null || value === "" ? " muted" : "");
           detail.textContent = value === undefined || value === null || value === "" ? "—" : displayValue(value);
           summary.appendChild(detail);
@@ -1434,30 +1667,7 @@ const HomePageHTML = `<!DOCTYPE html>
           context.appendChild(badge);
         });
         body.appendChild(context);
-
-        const fieldGrid = document.createElement("div");
-        fieldGrid.className = "field-grid";
-        extractFieldCards(source).forEach(function (entry) {
-          const fieldCard = document.createElement("div");
-          fieldCard.className = "field-card";
-
-          const fieldName = document.createElement("span");
-          fieldName.className = "field-name";
-          fieldName.textContent = entry.key;
-          fieldCard.appendChild(fieldName);
-
-          const fieldValue = document.createElement("span");
-          fieldValue.className = "field-value";
-          fieldValue.textContent = entry.value;
-          fieldCard.appendChild(fieldValue);
-
-          fieldGrid.appendChild(fieldCard);
-        });
-        body.appendChild(fieldGrid);
-
-        const pre = document.createElement("pre");
-        pre.textContent = JSON.stringify(source, null, 2);
-        body.appendChild(pre);
+        body.appendChild(renderDocumentView(source));
 
         row.appendChild(body);
         table.appendChild(row);

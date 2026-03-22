@@ -165,6 +165,7 @@ Watch for:
 - Keep UI changes aligned with server API behavior.
 - The search UI should lean toward a Kibana Discover style in dark mode: dense and app-like rather than marketing-like, with compact toolbars, a field/sidebar workflow, histogram-driven search context, and a tabular event stream.
 - Avoid drifting the search UI back toward oversized rounded-card layouts or explanatory hero copy when refining the main discover/search experience.
+- In the search UI, the available field list must be derived dynamically from the fields present in the current result data rather than from a hardcoded or artificially capped subset.
 - The cluster dashboard already exposes retention and index size; avoid drifting UI labels from backend field names.
 
 ## Local Development Commands

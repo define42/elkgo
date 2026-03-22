@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -20,7 +21,6 @@ import (
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/embed"
-	"net/url"
 )
 
 func TestSplitCSV_TrimsAndDropsEmptyParts(t *testing.T) {
@@ -50,6 +50,32 @@ func TestEnvOr_UsesEnvironmentWhenPresent(t *testing.T) {
 	}
 }
 
+func TestEnvOrInt_UsesEnvironmentWhenValid(t *testing.T) {
+	const key = "ELKGO_TESTDATA_MAIN_INT_ENV"
+	if err := os.Setenv(key, "42"); err != nil {
+		t.Fatalf("set env: %v", err)
+	}
+	defer os.Unsetenv(key)
+
+	if got := envOrInt(key, 7); got != 42 {
+		t.Fatalf("expected env int value, got %d", got)
+	}
+
+	if err := os.Setenv(key, "bad"); err != nil {
+		t.Fatalf("set invalid env: %v", err)
+	}
+	if got := envOrInt(key, 7); got != 7 {
+		t.Fatalf("expected fallback for invalid env, got %d", got)
+	}
+
+	if err := os.Setenv(key, "0"); err != nil {
+		t.Fatalf("set zero env: %v", err)
+	}
+	if got := envOrInt(key, 7); got != 7 {
+		t.Fatalf("expected fallback for non-positive env, got %d", got)
+	}
+}
+
 func TestRun_ValidatesAndSeedsThroughRealHTTPServer(t *testing.T) {
 	if err := run([]string{"-etcd-endpoints=   "}); err == nil || !strings.Contains(err.Error(), "at least one etcd endpoint is required") {
 		t.Fatalf("expected missing endpoint error, got %v", err)
@@ -57,7 +83,9 @@ func TestRun_ValidatesAndSeedsThroughRealHTTPServer(t *testing.T) {
 
 	endpoint := startEmbeddedEtcdForCmd(t)
 	client := newCmdEtcdClient(t, endpoint)
-	days := testdatagenDaysForMain(t)
+	dayCount := 3
+	eventsPerDay := 11
+	days := testdatagenDaysForMain(t, dayCount)
 	markerVersion := "cmd-run-test"
 	indexName := testdatagen.DefaultIndexName
 	for _, day := range days[:len(days)-1] {
@@ -124,6 +152,8 @@ func TestRun_ValidatesAndSeedsThroughRealHTTPServer(t *testing.T) {
 		"-server-url=" + ts.URL,
 		"-index=" + indexName,
 		"-etcd-endpoints=" + endpoint,
+		fmt.Sprintf("-days-back=%d", dayCount),
+		fmt.Sprintf("-events-per-day=%d", eventsPerDay),
 		"-replication-factor=2",
 		"-wait-for-members=2",
 		"-marker-version=" + markerVersion,
@@ -139,8 +169,8 @@ func TestRun_ValidatesAndSeedsThroughRealHTTPServer(t *testing.T) {
 	if len(gotBootstrapDays) != 1 || gotBootstrapDays[0] != targetDay {
 		t.Fatalf("unexpected bootstrap days: %#v", gotBootstrapDays)
 	}
-	if gotBulkDocCount == 0 {
-		t.Fatalf("expected at least one bulk ingest request")
+	if gotBulkDocCount != eventsPerDay {
+		t.Fatalf("expected %d generated docs, got %d", eventsPerDay, gotBulkDocCount)
 	}
 }
 
@@ -209,12 +239,12 @@ func allocateCmdURL(t *testing.T) url.URL {
 	return *u
 }
 
-func testdatagenDaysForMain(t *testing.T) []string {
+func testdatagenDaysForMain(t *testing.T, dayCount int) []string {
 	t.Helper()
 
 	base := time.Now().UTC().Truncate(24 * time.Hour)
-	days := make([]string, 0, testdatagen.DefaultDayCount)
-	for offset := testdatagen.DefaultDayCount - 1; offset >= 0; offset-- {
+	days := make([]string, 0, dayCount)
+	for offset := dayCount - 1; offset >= 0; offset-- {
 		days = append(days, base.AddDate(0, 0, -offset).Format("2006-01-02"))
 	}
 	return days

@@ -5,16 +5,20 @@ import (
 	"time"
 )
 
-func testDataDays(reference time.Time) []string {
+func buildTestDataDays(reference time.Time, dayCount int) []string {
 	base := reference.UTC().Truncate(24 * time.Hour)
-	days := make([]string, 0, DefaultDayCount)
-	for offset := DefaultDayCount - 1; offset >= 0; offset-- {
+	days := make([]string, 0, dayCount)
+	for offset := dayCount - 1; offset >= 0; offset-- {
 		days = append(days, base.AddDate(0, 0, -offset).Format("2006-01-02"))
 	}
 	return days
 }
 
-func testDataDocuments(day string) []Document {
+func testDataDays(reference time.Time) []string {
+	return buildTestDataDays(reference, DefaultDayCount)
+}
+
+func buildTestDataDocuments(day string, eventsPerDay int) []Document {
 	services := []string{"api", "ingest", "membership", "storage", "frontend", "scheduler", "billing", "worker"}
 	levels := []string{"info", "warn", "error"}
 	environments := []string{"prod", "stage", "dev"}
@@ -40,8 +44,8 @@ func testDataDocuments(day string) []Document {
 	}
 	base = base.UTC()
 
-	docs := make([]Document, 0, DefaultEventsPerDay)
-	for i := 0; i < DefaultEventsPerDay; i++ {
+	docs := make([]Document, 0, eventsPerDay)
+	for i := 0; i < eventsPerDay; i++ {
 		issue := issues[i%len(issues)]
 		service := services[i%len(services)]
 		level := levels[(i/3)%len(levels)]
@@ -67,4 +71,8 @@ func testDataDocuments(day string) []Document {
 		})
 	}
 	return docs
+}
+
+func testDataDocuments(day string) []Document {
+	return buildTestDataDocuments(day, DefaultEventsPerDay)
 }

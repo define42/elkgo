@@ -19,8 +19,8 @@ import (
 const (
 	DefaultIndexName       = "events"
 	DefaultDayCount        = 7
-	DefaultTotalEvents     = 70000
-	DefaultEventsPerDay    = DefaultTotalEvents / DefaultDayCount
+	DefaultEventsPerDay    = 10000
+	DefaultTotalEvents     = DefaultEventsPerDay * DefaultDayCount
 	DefaultBulkBatchSize   = 1000
 	DefaultMarkerVersion   = "v3"
 	defaultHTTPTimeout     = 8 * time.Second
@@ -38,6 +38,8 @@ type Config struct {
 	ServerURL         string
 	ETCDEndpoints     []string
 	IndexName         string
+	DayCount          int
+	EventsPerDay      int
 	ReplicationFactor int
 	WaitForMembers    int
 	BulkBatchSize     int
@@ -98,7 +100,7 @@ func (g *Generator) Run(ctx context.Context) error {
 	}
 	defer func() { _ = elect.Resign(context.Background()) }()
 
-	days := testDataDays(time.Now().UTC())
+	days := buildTestDataDays(time.Now().UTC(), g.cfg.DayCount)
 	seeded := 0
 	for _, day := range days {
 		markerKey := g.markerKey(day)
@@ -110,8 +112,9 @@ func (g *Generator) Run(ctx context.Context) error {
 			return fmt.Errorf("bootstrap test data routing failed for day %s: %w", day, err)
 		}
 
-		log.Printf("test data ingest start index=%s day=%s target=%d batch_size=%d", g.cfg.IndexName, day, DefaultEventsPerDay, g.cfg.BulkBatchSize)
-		indexed, err := g.postDocumentsInBatches(ctx, g.cfg.ServerURL+"/bulk?index="+url.QueryEscape(g.cfg.IndexName), day, testDataDocuments(day), g.cfg.BulkBatchSize)
+		docs := buildTestDataDocuments(day, g.cfg.EventsPerDay)
+		log.Printf("test data ingest start index=%s day=%s target=%d batch_size=%d", g.cfg.IndexName, day, len(docs), g.cfg.BulkBatchSize)
+		indexed, err := g.postDocumentsInBatches(ctx, g.cfg.ServerURL+"/bulk?index="+url.QueryEscape(g.cfg.IndexName), day, docs, g.cfg.BulkBatchSize)
 		if err != nil {
 			return fmt.Errorf("seed test bulk ingest failed for day %s: %w", day, err)
 		}
@@ -121,7 +124,7 @@ func (g *Generator) Run(ctx context.Context) error {
 		seeded += indexed
 	}
 
-	log.Printf("test data ready index=%s from=%s to=%s seeded=%d total=%d", g.cfg.IndexName, days[0], days[len(days)-1], seeded, DefaultTotalEvents)
+	log.Printf("test data ready index=%s from=%s to=%s seeded=%d total=%d", g.cfg.IndexName, days[0], days[len(days)-1], seeded, g.cfg.DayCount*g.cfg.EventsPerDay)
 	return nil
 }
 
@@ -139,6 +142,12 @@ func (cfg Config) withDefaults() Config {
 	cfg.IndexName = strings.TrimSpace(cfg.IndexName)
 	if cfg.IndexName == "" {
 		cfg.IndexName = DefaultIndexName
+	}
+	if cfg.DayCount < 1 {
+		cfg.DayCount = DefaultDayCount
+	}
+	if cfg.EventsPerDay < 1 {
+		cfg.EventsPerDay = DefaultEventsPerDay
 	}
 	if cfg.ReplicationFactor < 1 {
 		cfg.ReplicationFactor = 1

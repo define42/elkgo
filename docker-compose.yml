@@ -120,6 +120,8 @@ services:
     command:
       - -server-url=http://elkgo1:8081
       - -etcd-endpoints=http://etcd:2379
+      - -events-per-day=10000
+      - -days-back=10
       - -replication-factor=3
       - -wait-for-members=4
     restart: on-failure

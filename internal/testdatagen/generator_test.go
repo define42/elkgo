@@ -186,6 +186,33 @@ func TestTestDataGenerator_CoversSeventyThousandEventsAcrossSevenDays(t *testing
 	}
 }
 
+func TestBuildTestDataDays_UsesConfiguredCount(t *testing.T) {
+	days := buildTestDataDays(time.Date(2026, 3, 21, 0, 0, 0, 0, time.UTC), 3)
+	want := []string{
+		"2026-03-19",
+		"2026-03-20",
+		"2026-03-21",
+	}
+
+	if !reflect.DeepEqual(days, want) {
+		t.Fatalf("unexpected configured test data days: got %#v want %#v", days, want)
+	}
+}
+
+func TestBuildTestDataDocuments_UsesConfiguredEventCount(t *testing.T) {
+	docs := buildTestDataDocuments("2026-03-21", 12)
+
+	if len(docs) != 12 {
+		t.Fatalf("expected 12 docs, got %d", len(docs))
+	}
+	if got := docs[0]["id"]; got != "evt-00001" {
+		t.Fatalf("expected first deterministic id, got %#v", got)
+	}
+	if got := docs[len(docs)-1]["id"]; got != "evt-00012" {
+		t.Fatalf("expected last deterministic id, got %#v", got)
+	}
+}
+
 func writeJSON(t *testing.T, w http.ResponseWriter, status int, v any) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")

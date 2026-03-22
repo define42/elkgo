@@ -83,6 +83,20 @@ func TestWaitForCluster_TimeoutAndCancellation(t *testing.T) {
 	}
 }
 
+func TestConfigWithDefaults_AppliesDayAndEventDefaults(t *testing.T) {
+	cfg := (Config{}).withDefaults()
+
+	if cfg.IndexName != DefaultIndexName {
+		t.Fatalf("expected default index name %q, got %q", DefaultIndexName, cfg.IndexName)
+	}
+	if cfg.DayCount != DefaultDayCount {
+		t.Fatalf("expected default day count %d, got %d", DefaultDayCount, cfg.DayCount)
+	}
+	if cfg.EventsPerDay != DefaultEventsPerDay {
+		t.Fatalf("expected default events per day %d, got %d", DefaultEventsPerDay, cfg.EventsPerDay)
+	}
+}
+
 func TestBootstrapDay_PostsAndHandlesFailure(t *testing.T) {
 	requests := make([]string, 0, 2)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

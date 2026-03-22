@@ -25,7 +25,9 @@ func TestRun_EndToEndWithEmbeddedEtcd(t *testing.T) {
 
 	markerVersion := "run-test"
 	indexName := DefaultIndexName
-	days := testDataDays(time.Now().UTC())
+	dayCount := 3
+	eventsPerDay := 12
+	days := buildTestDataDays(time.Now().UTC(), dayCount)
 	for _, day := range days[:len(days)-1] {
 		markerKey := (&Generator{cfg: Config{IndexName: indexName, MarkerVersion: markerVersion}}).markerKey(day)
 		if _, err := client.Put(context.Background(), markerKey, time.Now().UTC().Format(time.RFC3339)); err != nil {
@@ -113,9 +115,11 @@ func TestRun_EndToEndWithEmbeddedEtcd(t *testing.T) {
 		ServerURL:         ts.URL,
 		ETCDEndpoints:     []string{endpoint},
 		IndexName:         indexName,
+		DayCount:          dayCount,
+		EventsPerDay:      eventsPerDay,
 		ReplicationFactor: 2,
 		WaitForMembers:    2,
-		BulkBatchSize:     DefaultEventsPerDay + 100,
+		BulkBatchSize:     eventsPerDay + 5,
 		WaitTimeout:       10 * time.Second,
 		PollInterval:      10 * time.Millisecond,
 		MarkerVersion:     markerVersion,
@@ -137,8 +141,8 @@ func TestRun_EndToEndWithEmbeddedEtcd(t *testing.T) {
 	if len(gotBootstrapDays) != 1 || gotBootstrapDays[0] != targetDay {
 		t.Fatalf("unexpected bootstrap days: %#v", gotBootstrapDays)
 	}
-	if gotBulkDocCount != len(testDataDocuments(targetDay)) {
-		t.Fatalf("expected %d bulk docs, got %d", len(testDataDocuments(targetDay)), gotBulkDocCount)
+	if gotBulkDocCount != len(buildTestDataDocuments(targetDay, eventsPerDay)) {
+		t.Fatalf("expected %d bulk docs, got %d", len(buildTestDataDocuments(targetDay, eventsPerDay)), gotBulkDocCount)
 	}
 	if len(gotBulkDays) != 1 || gotBulkDays[0] != targetDay {
 		t.Fatalf("unexpected bulk day observations: %#v", gotBulkDays)

@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	dockerbuild "github.com/docker/docker/api/types/build"
 	testcontainers "github.com/testcontainers/testcontainers-go"
 	tcnetwork "github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -204,6 +205,9 @@ func startIntegrationCluster(t *testing.T, ctx context.Context) integrationClust
 					Tag:            imageTag,
 					KeepImage:      true,
 					BuildLogWriter: io.Discard,
+					BuildOptionsModifier: func(o *dockerbuild.ImageBuildOptions) {
+						o.Version = dockerbuild.BuilderBuildKit
+					},
 				}))...,
 			)
 			if err == nil {

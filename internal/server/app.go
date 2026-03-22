@@ -10,27 +10,35 @@ import (
 )
 
 func New(cfg Config) *Server {
+	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
+
 	return &Server{
-		nodeID:              cfg.NodeID,
-		listen:              cfg.Listen,
-		publicAddr:          cfg.PublicAddr,
-		dataDir:             cfg.DataDir,
-		mode:                cfg.Mode,
-		client:              &http.Client{Timeout: 8 * time.Second},
-		indexes:             map[string]bleve.Index{},
-		replicaCache:        map[string]string{},
-		shardSyncingVersion: map[string]int64{},
-		shardSyncedVersion:  map[string]int64{},
-		etcdEndpoints:       append([]string(nil), cfg.ETCDEndpoints...),
-		routing:             map[string]RoutingEntry{},
-		members:             map[string]NodeInfo{},
-		drainStates:         map[string]NodeDrainState{},
-		offlineStates:       map[string]NodeOfflineState{},
-		replicationFactor:   cfg.ReplicationFactor,
-		routingPrefix:       "/distsearch/routing/",
-		memberPrefix:        "/distsearch/members/",
-		drainPrefix:         "/distsearch/drain/",
-		offlinePrefix:       "/distsearch/offline/",
+		nodeID:                cfg.NodeID,
+		listen:                cfg.Listen,
+		publicAddr:            cfg.PublicAddr,
+		dataDir:               cfg.DataDir,
+		mode:                  cfg.Mode,
+		backgroundCtx:         backgroundCtx,
+		backgroundCancel:      backgroundCancel,
+		client:                &http.Client{Timeout: 8 * time.Second},
+		indexes:               map[string]bleve.Index{},
+		replicaCache:          map[string]string{},
+		shardSyncingVersion:   map[string]int64{},
+		shardSyncedVersion:    map[string]int64{},
+		etcdEndpoints:         append([]string(nil), cfg.ETCDEndpoints...),
+		routing:               map[string]RoutingEntry{},
+		members:               map[string]NodeInfo{},
+		drainStates:           map[string]NodeDrainState{},
+		offlineStates:         map[string]NodeOfflineState{},
+		replicaRepairStates:   map[string]ReplicaRepairState{},
+		replicaRepairRunning:  map[string]bool{},
+		replicaRepairRequests: map[string]int64{},
+		replicationFactor:     cfg.ReplicationFactor,
+		routingPrefix:         "/distsearch/routing/",
+		memberPrefix:          "/distsearch/members/",
+		drainPrefix:           "/distsearch/drain/",
+		offlinePrefix:         "/distsearch/offline/",
+		replicaRepairPrefix:   "/distsearch/replica-repair/",
 	}
 }
 
@@ -51,17 +59,25 @@ func (s *Server) Run() error {
 	if err := s.loadRouting(ctx); err != nil {
 		return err
 	}
+	if err := s.loadReplicaRepairStates(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureOfflineMarkersForMissingRouteReplicas(ctx); err != nil {
 		return err
 	}
 	if err := s.loadOfflineStates(ctx); err != nil {
 		return err
 	}
+	if err := s.cleanupObsoleteReplicaRepairStates(); err != nil {
+		return err
+	}
+	s.resumeReplicaRepairLoops()
 
 	go s.watchMembers(context.Background())
 	go s.watchDrainStates(context.Background())
 	go s.watchOfflineStates(context.Background())
 	go s.watchRouting(context.Background())
+	go s.watchReplicaRepairStates(context.Background())
 	go s.offlineDrainLoop(context.Background())
 
 	mux := http.NewServeMux()
@@ -72,6 +88,9 @@ func (s *Server) Run() error {
 }
 
 func (s *Server) Close() {
+	if s.backgroundCancel != nil {
+		s.backgroundCancel()
+	}
 	if s.memberLeaseCancel != nil {
 		s.memberLeaseCancel()
 	}

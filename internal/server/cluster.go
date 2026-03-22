@@ -211,6 +211,10 @@ func (s *Server) loadRouting(ctx context.Context) error {
 	s.routingMu.Unlock()
 	s.clearReplicaCache()
 	s.syncAssignedShardsAsync(oldRouting, routing)
+	if err := s.cleanupObsoleteReplicaRepairStates(); err != nil {
+		return err
+	}
+	s.resumeReplicaRepairLoops()
 	return nil
 }
 

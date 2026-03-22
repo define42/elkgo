@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -393,6 +394,169 @@ func TestHandleSearch_CachesReplicaAfterFailover(t *testing.T) {
 	}
 	if n2HealthCalls != 0 || n3HealthCalls != 0 {
 		t.Fatalf("expected zero health probes, got n2=%d n3=%d", n2HealthCalls, n3HealthCalls)
+	}
+}
+
+func TestHandleIndex_PartialReplicaFailureSkipsStaleReplicaUntilRepair(t *testing.T) {
+	primary, primaryTS := newNamedTestHTTPServer(t, "n1")
+
+	var healthySearchCalls atomic.Int32
+	healthy, healthyTS := newWrappedTestHTTPServer(t, "n2", func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/internal/search_shard" {
+				healthySearchCalls.Add(1)
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	var staleSearchCalls atomic.Int32
+	var staleWritesEnabled atomic.Bool
+	stale, staleTS := newWrappedTestHTTPServer(t, "n3", func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/internal/index_batch":
+				if !staleWritesEnabled.Load() {
+					http.Error(w, "replica write unavailable", http.StatusServiceUnavailable)
+					return
+				}
+			case "/internal/search_shard":
+				staleSearchCalls.Add(1)
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	day := "2026-03-21"
+	shardID := 7
+	docID := findDocIDForShard(t, shardID, "repair-stale-replica")
+	doc := Document{
+		"id":        docID,
+		"timestamp": day + "T09:00:00Z",
+		"message":   "repair-token",
+	}
+
+	for _, srv := range []*Server{primary, healthy, stale} {
+		setTestRoute(srv, "events", day, shardID, []string{"n1", "n2", "n3"})
+	}
+
+	primary.membersMu.Lock()
+	primary.members = map[string]NodeInfo{
+		"n1": {ID: "n1", Addr: primaryTS.URL},
+		"n2": {ID: "n2", Addr: healthyTS.URL},
+		"n3": {ID: "n3", Addr: staleTS.URL},
+	}
+	primary.membersMu.Unlock()
+
+	body, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal index document: %v", err)
+	}
+
+	resp, err := http.Post(primaryTS.URL+"/index?index=events", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatalf("index request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected partial replica failure to keep quorum, got %d", resp.StatusCode)
+	}
+
+	var indexPayload struct {
+		OK     bool     `json:"ok"`
+		Errors []string `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&indexPayload); err != nil {
+		t.Fatalf("decode index response: %v", err)
+	}
+	if !indexPayload.OK {
+		t.Fatalf("expected quorum write to succeed, got %#v", indexPayload)
+	}
+	if len(indexPayload.Errors) != 1 || !strings.Contains(indexPayload.Errors[0], "n3") {
+		t.Fatalf("expected n3 replication error, got %#v", indexPayload.Errors)
+	}
+	if !primary.replicaNeedsRepair("events", day, shardID, "n3") {
+		t.Fatalf("expected n3 to be marked out-of-sync after failed replication")
+	}
+
+	primary.membersMu.Lock()
+	primary.members = map[string]NodeInfo{
+		"n2": {ID: "n2", Addr: healthyTS.URL},
+		"n3": {ID: "n3", Addr: staleTS.URL},
+	}
+	primary.membersMu.Unlock()
+
+	searchResp, err := http.Get(primaryTS.URL + "/search?index=events&day=" + url.QueryEscape(day) + "&q=repair-token&k=10")
+	if err != nil {
+		t.Fatalf("search request before repair failed: %v", err)
+	}
+	defer searchResp.Body.Close()
+
+	if searchResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected search status 200 before repair, got %d", searchResp.StatusCode)
+	}
+
+	var searchPayload struct {
+		Hits []ShardHit `json:"hits"`
+	}
+	if err := json.NewDecoder(searchResp.Body).Decode(&searchPayload); err != nil {
+		t.Fatalf("decode search before repair: %v", err)
+	}
+	if len(searchPayload.Hits) != 1 || searchPayload.Hits[0].DocID != docID {
+		t.Fatalf("unexpected search hits before repair: %#v", searchPayload.Hits)
+	}
+	if healthySearchCalls.Load() == 0 {
+		t.Fatalf("expected healthy replica to serve the search while stale replica is blocked")
+	}
+	if staleSearchCalls.Load() != 0 {
+		t.Fatalf("expected stale replica to be skipped before repair, got %d search calls", staleSearchCalls.Load())
+	}
+
+	staleWritesEnabled.Store(true)
+	waitForTestCondition(t, 5*time.Second, 50*time.Millisecond, "stale replica to repair", func() (bool, error) {
+		idx, err := stale.openShardIndex("events", day, shardID)
+		if err != nil {
+			return false, err
+		}
+		count, err := idx.DocCount()
+		if err != nil {
+			return false, err
+		}
+		return count == 1, nil
+	})
+
+	waitForTestCondition(t, 5*time.Second, 50*time.Millisecond, "primary to clear replica repair marker", func() (bool, error) {
+		return !primary.replicaNeedsRepair("events", day, shardID, "n3"), nil
+	})
+
+	primary.membersMu.Lock()
+	primary.members = map[string]NodeInfo{
+		"n3": {ID: "n3", Addr: staleTS.URL},
+	}
+	primary.membersMu.Unlock()
+
+	searchResp, err = http.Get(primaryTS.URL + "/search?index=events&day=" + url.QueryEscape(day) + "&q=repair-token&k=10")
+	if err != nil {
+		t.Fatalf("search request after repair failed: %v", err)
+	}
+	defer searchResp.Body.Close()
+
+	if searchResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected search status 200 after repair, got %d", searchResp.StatusCode)
+	}
+
+	searchPayload = struct {
+		Hits []ShardHit `json:"hits"`
+	}{}
+	if err := json.NewDecoder(searchResp.Body).Decode(&searchPayload); err != nil {
+		t.Fatalf("decode search after repair: %v", err)
+	}
+	if len(searchPayload.Hits) != 1 || searchPayload.Hits[0].DocID != docID {
+		t.Fatalf("unexpected search hits after repair: %#v", searchPayload.Hits)
+	}
+	if staleSearchCalls.Load() == 0 {
+		t.Fatalf("expected repaired replica to serve searches once caught up")
 	}
 }
 
@@ -908,10 +1072,20 @@ func TestNormalizeGenericDocument_PreservesGenericFieldsAndPartitionDay(t *testi
 
 func newTestHTTPServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
+	return newWrappedTestHTTPServer(t, "n1", nil)
+}
+
+func newNamedTestHTTPServer(t *testing.T, nodeID string) (*Server, *httptest.Server) {
+	t.Helper()
+	return newWrappedTestHTTPServer(t, nodeID, nil)
+}
+
+func newWrappedTestHTTPServer(t *testing.T, nodeID string, wrap func(http.Handler) http.Handler) (*Server, *httptest.Server) {
+	t.Helper()
 
 	s := New(Config{
 		Mode:              "both",
-		NodeID:            "n1",
+		NodeID:            nodeID,
 		Listen:            ":0",
 		DataDir:           t.TempDir(),
 		ReplicationFactor: 1,
@@ -919,11 +1093,15 @@ func newTestHTTPServer(t *testing.T) (*Server, *httptest.Server) {
 
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
-	ts := httptest.NewServer(mux)
+	var handler http.Handler = mux
+	if wrap != nil {
+		handler = wrap(handler)
+	}
+	ts := httptest.NewServer(handler)
 
 	s.membersMu.Lock()
 	s.members = map[string]NodeInfo{
-		"n1": {ID: "n1", Addr: ts.URL},
+		nodeID: {ID: nodeID, Addr: ts.URL},
 	}
 	s.membersMu.Unlock()
 
@@ -933,6 +1111,25 @@ func newTestHTTPServer(t *testing.T) (*Server, *httptest.Server) {
 	})
 
 	return s, ts
+}
+
+func waitForTestCondition(t *testing.T, timeout, interval time.Duration, description string, fn func() (bool, error)) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for {
+		ok, err := fn()
+		if err == nil && ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				t.Fatalf("timed out waiting for %s: %v", description, err)
+			}
+			t.Fatalf("timed out waiting for %s", description)
+		}
+		time.Sleep(interval)
+	}
 }
 
 func setTestRoute(s *Server, indexName, day string, shardID int, replicas []string) {

@@ -47,6 +47,14 @@ type NodeOfflineState struct {
 	MissingSince string `json:"missing_since"`
 }
 
+type ReplicaRepairState struct {
+	IndexName string `json:"index_name"`
+	Day       string `json:"day"`
+	ShardID   int    `json:"shard_id"`
+	NodeID    string `json:"node_id"`
+	MarkedAt  string `json:"marked_at"`
+}
+
 type ShardHit struct {
 	Index  string   `json:"index"`
 	Day    string   `json:"day"`
@@ -136,6 +144,9 @@ type Server struct {
 	dataDir    string
 	mode       string
 
+	backgroundCtx    context.Context
+	backgroundCancel context.CancelFunc
+
 	client *http.Client
 
 	mu      sync.RWMutex
@@ -159,15 +170,23 @@ type Server struct {
 	offlineMu     sync.RWMutex
 	offlineStates map[string]NodeOfflineState
 
+	replicaRepairMu     sync.RWMutex
+	replicaRepairStates map[string]ReplicaRepairState
+
+	replicaRepairTaskMu   sync.Mutex
+	replicaRepairRunning  map[string]bool
+	replicaRepairRequests map[string]int64
+
 	routingMu sync.RWMutex
 	routing   map[string]RoutingEntry
 
 	membersMu sync.RWMutex
 	members   map[string]NodeInfo
 
-	replicationFactor int
-	routingPrefix     string
-	memberPrefix      string
-	drainPrefix       string
-	offlinePrefix     string
+	replicationFactor   int
+	routingPrefix       string
+	memberPrefix        string
+	drainPrefix         string
+	offlinePrefix       string
+	replicaRepairPrefix string
 }

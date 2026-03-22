@@ -376,6 +376,7 @@ func (s *Server) indexBatchOnPrimary(ctx context.Context, indexName, day string,
 
 	acks := 1
 	errs := make([]string, 0)
+	failedReplicas := make([]string, 0)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
@@ -389,6 +390,7 @@ func (s *Server) indexBatchOnPrimary(ctx context.Context, indexName, day string,
 			if !ok {
 				mu.Lock()
 				errs = append(errs, replica+": not registered")
+				failedReplicas = append(failedReplicas, replica)
 				mu.Unlock()
 				return
 			}
@@ -406,6 +408,7 @@ func (s *Server) indexBatchOnPrimary(ctx context.Context, indexName, day string,
 			defer mu.Unlock()
 			if err != nil {
 				errs = append(errs, replica+": "+err.Error())
+				failedReplicas = append(failedReplicas, replica)
 				return
 			}
 			acks++
@@ -413,6 +416,10 @@ func (s *Server) indexBatchOnPrimary(ctx context.Context, indexName, day string,
 	}
 
 	wg.Wait()
+
+	for _, replica := range failedReplicas {
+		s.scheduleReplicaRepair(route, replica)
+	}
 
 	resp.Acks = acks
 	resp.Quorum = len(route.Replicas)/2 + 1

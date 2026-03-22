@@ -133,7 +133,7 @@ func (s *Server) ownsReplica(indexName, day string, shardID int) bool {
 func (s *Server) pickReplicaForRoute(_ context.Context, route RoutingEntry, exclude map[string]struct{}) (string, string, error) {
 	routeKey := routingMapKey(route.IndexName, route.Day, route.ShardID)
 	if cachedNodeID, ok := s.cachedReplica(routeKey); ok {
-		if _, skipped := exclude[cachedNodeID]; !skipped && routeHasReplica(route, cachedNodeID) {
+		if _, skipped := exclude[cachedNodeID]; !skipped && routeHasReplica(route, cachedNodeID) && !s.replicaNeedsRepair(route.IndexName, route.Day, route.ShardID, cachedNodeID) {
 			if addr, ok := s.memberAddr(cachedNodeID); ok {
 				return cachedNodeID, addr, nil
 			}
@@ -143,6 +143,9 @@ func (s *Server) pickReplicaForRoute(_ context.Context, route RoutingEntry, excl
 
 	for _, nodeID := range route.Replicas {
 		if _, skipped := exclude[nodeID]; skipped {
+			continue
+		}
+		if s.replicaNeedsRepair(route.IndexName, route.Day, route.ShardID, nodeID) {
 			continue
 		}
 		addr, ok := s.memberAddr(nodeID)

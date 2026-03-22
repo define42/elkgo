@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 FROM golang:1.26.1 AS builder
 
 WORKDIR /src

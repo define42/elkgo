@@ -634,6 +634,89 @@ func TestAutoDrainResumeAndRun_WithEmbeddedEtcd(t *testing.T) {
 	}
 }
 
+func TestRunAndClose_GracefulShutdownAndTimeouts(t *testing.T) {
+	cluster := startEmbeddedEtcd(t)
+	listenURL := mustAllocateURL(t)
+
+	s := New(Config{
+		Mode:              "both",
+		NodeID:            "shutdown-node",
+		Listen:            listenURL.Host,
+		PublicAddr:        listenURL.String(),
+		DataDir:           t.TempDir(),
+		ETCDEndpoints:     []string{cluster.endpoint},
+		ReplicationFactor: 1,
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.Run()
+	}()
+
+	runFinished := false
+	defer func() {
+		s.Close()
+		if runFinished {
+			return
+		}
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("Run returned error during cleanup: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for Run to return during cleanup")
+		}
+	}()
+
+	waitForTestCondition(t, 5*time.Second, 25*time.Millisecond, "server health", func() (bool, error) {
+		resp, err := http.Get(listenURL.String() + "/healthz")
+		if err != nil {
+			return false, nil
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK, nil
+	})
+
+	httpServer := s.currentHTTPServer()
+	if httpServer == nil {
+		t.Fatal("expected currentHTTPServer to be set while Run is active")
+	}
+	if httpServer.ReadHeaderTimeout != serverReadHeaderTimeout {
+		t.Fatalf("unexpected ReadHeaderTimeout: got %s want %s", httpServer.ReadHeaderTimeout, serverReadHeaderTimeout)
+	}
+	if httpServer.ReadTimeout != serverReadTimeout {
+		t.Fatalf("unexpected ReadTimeout: got %s want %s", httpServer.ReadTimeout, serverReadTimeout)
+	}
+	if httpServer.WriteTimeout != serverWriteTimeout {
+		t.Fatalf("unexpected WriteTimeout: got %s want %s", httpServer.WriteTimeout, serverWriteTimeout)
+	}
+	if httpServer.IdleTimeout != serverIdleTimeout {
+		t.Fatalf("unexpected IdleTimeout: got %s want %s", httpServer.IdleTimeout, serverIdleTimeout)
+	}
+
+	s.Close()
+
+	select {
+	case err := <-errCh:
+		runFinished = true
+		if err != nil {
+			t.Fatalf("Run returned error after Close: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Run to return after Close")
+	}
+
+	if err := s.backgroundCtx.Err(); err == nil {
+		t.Fatal("expected background context to be canceled after Close")
+	}
+
+	client := http.Client{Timeout: 500 * time.Millisecond}
+	if _, err := client.Get(listenURL.String() + "/healthz"); err == nil {
+		t.Fatal("expected health request to fail after Close")
+	}
+}
+
 func startEmbeddedEtcd(t *testing.T) embeddedEtcd {
 	t.Helper()
 

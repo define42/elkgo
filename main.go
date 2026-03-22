@@ -1,22 +1,32 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"elkgo/internal/server"
 )
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := runContext(ctx, os.Args[1:]); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func run(args []string) error {
+	return runContext(context.Background(), args)
+}
+
+func runContext(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("elkgo", flag.ContinueOnError)
 
 	var mode string
@@ -52,6 +62,15 @@ func run(args []string) error {
 		ETCDEndpoints:     endpoints,
 		ReplicationFactor: replicationFactor,
 	})
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.Close()
+		case <-done:
+		}
+	}()
+	defer close(done)
 	defer s.Close()
 
 	return s.Run()

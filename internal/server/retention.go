@@ -66,7 +66,7 @@ func (s *Server) watchIndexRetentionPolicies(ctx context.Context) {
 			log.Printf("watch index retention policies error: %v", wr.Err())
 			continue
 		}
-		if err := s.loadIndexRetentionPolicies(context.Background()); err != nil {
+		if err := s.loadIndexRetentionPolicies(ctx); err != nil {
 			log.Printf("load index retention policies failed: %v", err)
 			continue
 		}
@@ -153,7 +153,10 @@ func (s *Server) runRetentionCleanup(ctx context.Context, now time.Time) error {
 
 func (s *Server) runRetentionCleanupAsync() {
 	go func() {
-		if err := s.runRetentionCleanup(context.Background(), time.Now().UTC()); err != nil {
+		if err := s.backgroundCtx.Err(); err != nil {
+			return
+		}
+		if err := s.runRetentionCleanup(s.backgroundCtx, time.Now().UTC()); err != nil {
 			log.Printf("retention cleanup failed: %v", err)
 		}
 	}()
@@ -168,7 +171,7 @@ func (s *Server) retentionCleanupLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.runRetentionCleanup(context.Background(), time.Now().UTC()); err != nil {
+			if err := s.runRetentionCleanup(ctx, time.Now().UTC()); err != nil {
 				log.Printf("retention cleanup failed: %v", err)
 			}
 		}
@@ -211,7 +214,7 @@ func (s *Server) cleanupExpiredRouting(ctx context.Context, now time.Time) error
 		return nil
 	}
 
-	return s.loadRouting(context.Background())
+	return s.loadRouting(ctx)
 }
 
 func (s *Server) expiredRoutingPrefixes(now time.Time) []string {

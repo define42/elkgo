@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -64,6 +66,43 @@ func TestRun_ReturnsValidationAndListenErrors(t *testing.T) {
 	}
 }
 
+func TestRunContext_ShutsDownOnCancel(t *testing.T) {
+	endpoint := startEmbeddedEtcdForMain(t)
+	listenURL := allocateMainURL(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runContext(ctx, []string{
+			"-node-id=test-main-shutdown",
+			"-listen=" + listenURL.Host,
+			"-public-addr=" + listenURL.String(),
+			"-data=" + t.TempDir(),
+			"-etcd-endpoints=" + endpoint,
+			"-replication-factor=1",
+		})
+	}()
+
+	waitForMainHTTP(t, listenURL.String()+"/healthz")
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("runContext returned error after cancel: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for runContext to return after cancel")
+	}
+
+	client := http.Client{Timeout: 500 * time.Millisecond}
+	if _, err := client.Get(listenURL.String() + "/healthz"); err == nil {
+		t.Fatal("expected server to stop after cancel")
+	}
+}
+
 func startEmbeddedEtcdForMain(t *testing.T) string {
 	t.Helper()
 
@@ -113,4 +152,23 @@ func allocateMainURL(t *testing.T) url.URL {
 		t.Fatalf("parse allocated URL: %v", err)
 	}
 	return *u
+}
+
+func waitForMainHTTP(t *testing.T, target string) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	client := http.Client{Timeout: 500 * time.Millisecond}
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(target)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for %s", target)
 }

@@ -2,11 +2,20 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"time"
 
 	"github.com/blevesearch/bleve/v2"
+)
+
+const (
+	serverReadHeaderTimeout = 5 * time.Second
+	serverReadTimeout       = 2 * time.Minute
+	serverWriteTimeout      = 2 * time.Minute
+	serverIdleTimeout       = 2 * time.Minute
+	serverShutdownTimeout   = 10 * time.Second
 )
 
 func New(cfg Config) *Server {
@@ -45,7 +54,7 @@ func New(cfg Config) *Server {
 }
 
 func (s *Server) Run() error {
-	ctx := context.Background()
+	ctx := s.backgroundCtx
 	if err := s.connectEtcd(ctx); err != nil {
 		return err
 	}
@@ -81,37 +90,61 @@ func (s *Server) Run() error {
 		return err
 	}
 
-	go s.watchMembers(context.Background())
-	go s.watchDrainStates(context.Background())
-	go s.watchOfflineStates(context.Background())
-	go s.watchRouting(context.Background())
-	go s.watchIndexRetentionPolicies(context.Background())
-	go s.watchReplicaRepairStates(context.Background())
-	go s.offlineDrainLoop(context.Background())
-	go s.retentionCleanupLoop(context.Background())
+	go s.watchMembers(s.backgroundCtx)
+	go s.watchDrainStates(s.backgroundCtx)
+	go s.watchOfflineStates(s.backgroundCtx)
+	go s.watchRouting(s.backgroundCtx)
+	go s.watchIndexRetentionPolicies(s.backgroundCtx)
+	go s.watchReplicaRepairStates(s.backgroundCtx)
+	go s.offlineDrainLoop(s.backgroundCtx)
+	go s.retentionCleanupLoop(s.backgroundCtx)
 
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 
+	httpServer := &http.Server{
+		Addr:              s.listen,
+		Handler:           loggingMiddleware(mux),
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		ReadTimeout:       serverReadTimeout,
+		WriteTimeout:      serverWriteTimeout,
+		IdleTimeout:       serverIdleTimeout,
+	}
+	s.setHTTPServer(httpServer)
+	defer s.clearHTTPServer(httpServer)
+
 	log.Printf("starting mode=%s node=%s listen=%s etcd=%v", s.mode, s.nodeID, s.listen, s.etcdEndpoints)
-	return http.ListenAndServe(s.listen, loggingMiddleware(mux))
+	err := httpServer.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
 }
 
 func (s *Server) Close() {
-	if s.backgroundCancel != nil {
-		s.backgroundCancel()
-	}
-	if s.memberLeaseCancel != nil {
-		s.memberLeaseCancel()
-	}
-	s.mu.Lock()
-	for _, idx := range s.indexes {
-		_ = idx.Close()
-	}
-	s.mu.Unlock()
-	if s.etcd != nil {
-		_ = s.etcd.Close()
-	}
+	s.closeOnce.Do(func() {
+		if s.backgroundCancel != nil {
+			s.backgroundCancel()
+		}
+		if s.memberLeaseCancel != nil {
+			s.memberLeaseCancel()
+		}
+		if httpServer := s.currentHTTPServer(); httpServer != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
+			if err := httpServer.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				_ = httpServer.Close()
+			}
+			cancel()
+		}
+		s.mu.Lock()
+		for _, idx := range s.indexes {
+			_ = idx.Close()
+		}
+		s.mu.Unlock()
+		if s.etcd != nil {
+			_ = s.etcd.Close()
+		}
+	})
 }
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
@@ -140,4 +173,24 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start))
 	})
+}
+
+func (s *Server) setHTTPServer(httpServer *http.Server) {
+	s.httpServerMu.Lock()
+	s.httpServer = httpServer
+	s.httpServerMu.Unlock()
+}
+
+func (s *Server) clearHTTPServer(httpServer *http.Server) {
+	s.httpServerMu.Lock()
+	if s.httpServer == httpServer {
+		s.httpServer = nil
+	}
+	s.httpServerMu.Unlock()
+}
+
+func (s *Server) currentHTTPServer() *http.Server {
+	s.httpServerMu.Lock()
+	defer s.httpServerMu.Unlock()
+	return s.httpServer
 }

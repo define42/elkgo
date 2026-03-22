@@ -96,7 +96,7 @@ func (s *Server) rebalanceRouting(ctx context.Context) error {
 		}
 	}
 
-	_ = s.loadRouting(context.Background())
+	_ = s.loadRouting(ctx)
 	log.Printf("rebalance updated %d shard routes across %d members", len(updates), len(members))
 	return nil
 }
@@ -151,7 +151,7 @@ func (s *Server) maybeAutoDrainExpiredOfflineNodes(ctx context.Context) (bool, e
 	}
 
 	if changed {
-		if err := s.loadMembers(context.Background()); err != nil {
+		if err := s.loadMembers(ctx); err != nil {
 			return true, err
 		}
 	}
@@ -178,7 +178,7 @@ func (s *Server) maybeAutoResumeRecoveredNodes(ctx context.Context) (bool, error
 		}
 	}
 
-	if err := s.loadMembers(context.Background()); err != nil {
+	if err := s.loadMembers(ctx); err != nil {
 		return true, err
 	}
 	return true, nil
@@ -409,7 +409,7 @@ func (s *Server) syncAssignedShardsAsync(oldRouting, newRouting map[string]Routi
 		return
 	}
 
-	go s.syncAssignedShards(context.Background(), tasks)
+	go s.syncAssignedShards(s.backgroundCtx, tasks)
 }
 
 func shardSyncTasksForNode(nodeID string, oldRouting, newRouting map[string]RoutingEntry) []shardSyncTask {

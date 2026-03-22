@@ -120,19 +120,19 @@ func (s *Server) watchMembers(ctx context.Context) {
 			continue
 		}
 		previousMembers := s.snapshotMembers()
-		if err := s.loadMembers(context.Background()); err != nil {
+		if err := s.loadMembers(ctx); err != nil {
 			log.Printf("load members failed: %v", err)
 			continue
 		}
 		currentMembers := s.snapshotMembers()
-		if err := s.reconcileOfflineMarkers(context.Background(), previousMembers, currentMembers); err != nil {
+		if err := s.reconcileOfflineMarkers(ctx, previousMembers, currentMembers); err != nil {
 			log.Printf("reconcile offline markers failed: %v", err)
 		}
-		if err := s.loadOfflineStates(context.Background()); err != nil {
+		if err := s.loadOfflineStates(ctx); err != nil {
 			log.Printf("load offline states after member update failed: %v", err)
 		}
 		if shouldRebalanceForMemberChange(previousMembers, currentMembers) {
-			go s.maybeRebalanceRouting(context.Background())
+			go s.maybeRebalanceRouting(s.backgroundCtx)
 		}
 	}
 }
@@ -144,11 +144,11 @@ func (s *Server) watchDrainStates(ctx context.Context) {
 			log.Printf("watch drain states error: %v", wr.Err())
 			continue
 		}
-		if err := s.loadMembers(context.Background()); err != nil {
+		if err := s.loadMembers(ctx); err != nil {
 			log.Printf("load members after drain update failed: %v", err)
 			continue
 		}
-		go s.maybeRebalanceRouting(context.Background())
+		go s.maybeRebalanceRouting(s.backgroundCtx)
 	}
 }
 
@@ -159,7 +159,7 @@ func (s *Server) watchOfflineStates(ctx context.Context) {
 			log.Printf("watch offline states error: %v", wr.Err())
 			continue
 		}
-		if err := s.loadOfflineStates(context.Background()); err != nil {
+		if err := s.loadOfflineStates(ctx); err != nil {
 			log.Printf("load offline states failed: %v", err)
 		}
 	}
@@ -174,19 +174,19 @@ func (s *Server) offlineDrainLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			changed, err := s.maybeAutoDrainExpiredOfflineNodes(context.Background())
+			changed, err := s.maybeAutoDrainExpiredOfflineNodes(ctx)
 			if err != nil {
 				log.Printf("auto-drain offline nodes failed: %v", err)
 				continue
 			}
-			resumed, err := s.maybeAutoResumeRecoveredNodes(context.Background())
+			resumed, err := s.maybeAutoResumeRecoveredNodes(ctx)
 			if err != nil {
 				log.Printf("auto-resume recovered nodes failed: %v", err)
 				continue
 			}
 			changed = changed || resumed
 			if changed {
-				go s.maybeRebalanceRouting(context.Background())
+				go s.maybeRebalanceRouting(s.backgroundCtx)
 			}
 		}
 	}
@@ -216,6 +216,9 @@ func (s *Server) loadRouting(ctx context.Context) error {
 	}
 	s.resumeReplicaRepairLoops()
 	go func() {
+		if err := s.backgroundCtx.Err(); err != nil {
+			return
+		}
 		if err := s.cleanupExpiredLocalShardDays(time.Now().UTC()); err != nil {
 			log.Printf("cleanup expired local shards failed: %v", err)
 		}
@@ -230,7 +233,7 @@ func (s *Server) watchRouting(ctx context.Context) {
 			log.Printf("watch routing error: %v", wr.Err())
 			continue
 		}
-		_ = s.loadRouting(context.Background())
+		_ = s.loadRouting(ctx)
 	}
 }
 
@@ -282,7 +285,7 @@ func (s *Server) bootstrapRouting(ctx context.Context, indexName, day string, rf
 		}
 		created = append(created, entry)
 	}
-	_ = s.loadRouting(context.Background())
+	_ = s.loadRouting(ctx)
 	return created, nil
 }
 

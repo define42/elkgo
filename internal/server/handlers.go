@@ -251,11 +251,11 @@ func (s *Server) handleNodeDrain(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.loadMembers(context.Background()); err != nil {
+	if err := s.loadMembers(s.backgroundCtx); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	go s.maybeRebalanceRouting(context.Background())
+	go s.maybeRebalanceRouting(s.backgroundCtx)
 
 	member = s.snapshotMembers()[nodeID]
 	writeJSON(w, http.StatusOK, map[string]any{

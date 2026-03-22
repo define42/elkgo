@@ -61,7 +61,7 @@ func (s *Server) watchReplicaRepairStates(ctx context.Context) {
 			log.Printf("watch replica repair states error: %v", wr.Err())
 			continue
 		}
-		if err := s.loadReplicaRepairStates(context.Background()); err != nil {
+		if err := s.loadReplicaRepairStates(ctx); err != nil {
 			log.Printf("load replica repair states failed: %v", err)
 			continue
 		}

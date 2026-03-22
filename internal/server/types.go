@@ -155,7 +155,12 @@ type Server struct {
 	backgroundCtx    context.Context
 	backgroundCancel context.CancelFunc
 
+	closeOnce sync.Once
+
 	client *http.Client
+
+	httpServerMu sync.Mutex
+	httpServer   *http.Server
 
 	mu      sync.RWMutex
 	indexes map[string]bleve.Index

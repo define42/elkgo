@@ -25,7 +25,7 @@ import (
 
 const (
 	integrationClusterNodes      = 4
-	integrationDayCount          = 14
+	integrationDayCount          = 7
 	integrationTotalEvents       = 10000
 	integrationReplicationFactor = 3
 	integrationIndexName         = "events"

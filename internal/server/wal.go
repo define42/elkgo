@@ -21,6 +21,7 @@ const (
 	sourceRecordVersion         byte = 1
 	sourceRecordCodecZstd       byte = 1
 	sourceRecordHeaderSize           = 32
+	maxSourceRecordSize              = 256 << 20 // 256 MiB
 	sourceFieldSegment               = "__source_segment"
 	sourceFieldOffset                = "__source_offset"
 	sourceFieldCompressedLength      = "__source_compressed_length"
@@ -230,6 +231,13 @@ func readSourceRecord(file *os.File, pointer sourcePointer) ([]byte, error) {
 	rawLength := binary.LittleEndian.Uint64(header[8:16])
 	compressedLength := binary.LittleEndian.Uint64(header[16:24])
 	checksum := binary.LittleEndian.Uint32(header[24:28])
+
+	if compressedLength > maxSourceRecordSize {
+		return nil, fmt.Errorf("source record compressed length %d exceeds limit %d", compressedLength, maxSourceRecordSize)
+	}
+	if rawLength > maxSourceRecordSize {
+		return nil, fmt.Errorf("source record raw length %d exceeds limit %d", rawLength, maxSourceRecordSize)
+	}
 
 	if pointer.RawLength > 0 && pointer.RawLength != rawLength {
 		return nil, fmt.Errorf("source raw length mismatch: got %d want %d", rawLength, pointer.RawLength)

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -416,6 +418,11 @@ func (s *Server) handleStreamDocs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.localShardExists(indexName, day, shardID) {
+		http.Error(w, "shard not available", http.StatusServiceUnavailable)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	flusher, _ := w.(http.Flusher)
 	enc := json.NewEncoder(w)
@@ -430,11 +437,11 @@ func (s *Server) handleStreamDocs(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	}); err != nil {
-		if err == errShardIndexMissing {
-			http.Error(w, "shard not available", http.StatusServiceUnavailable)
+		if streamed == 0 {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("stream_docs error after %d documents: %v", streamed, err)
 		return
 	}
 	if flusher != nil {
@@ -628,7 +635,7 @@ func (s *Server) fetchShardStats(ctx context.Context, route RoutingEntry) (Shard
 		tried[replicaNodeID] = struct{}{}
 
 		var resp ShardStatsResponse
-		err = s.getJSON(ctx, addr+"/internal/shard_stats?index="+route.IndexName+"&day="+route.Day+"&shard="+strconv.Itoa(route.ShardID), &resp)
+		err = s.getJSON(ctx, fmt.Sprintf("%s/internal/shard_stats?index=%s&day=%s&shard=%d", addr, url.QueryEscape(route.IndexName), url.QueryEscape(route.Day), route.ShardID), &resp)
 		if err == nil {
 			return resp, nil
 		}

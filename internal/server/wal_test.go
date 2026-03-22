@@ -557,6 +557,52 @@ func TestReadSourceRecord_HeaderValidation(t *testing.T) {
 	}
 }
 
+func TestReadSourceRecord_BoundsCheck(t *testing.T) {
+	raw := []byte(`{"id":"bounds-check","message":"test"}`)
+	compressed := compressSourceRecord(raw)
+
+	// Write a valid record then corrupt the compressed-length field to exceed the limit.
+	file, err := os.CreateTemp(t.TempDir(), "source-bounds-*.wal")
+	if err != nil {
+		t.Fatalf("create temp WAL: %v", err)
+	}
+	if err := writeSourceRecord(file, raw, compressed); err != nil {
+		t.Fatalf("write source record: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close temp WAL: %v", err)
+	}
+
+	// Corrupt compressed length (bytes 16-23) to a huge value.
+	f, err := os.OpenFile(file.Name(), os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("open WAL for corruption: %v", err)
+	}
+	// Write 0xFF bytes into the compressed-length field to create a huge value.
+	if _, err := f.WriteAt([]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F}, 16); err != nil {
+		_ = f.Close()
+		t.Fatalf("corrupt compressed length: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close corrupted WAL: %v", err)
+	}
+
+	reader, err := os.Open(file.Name())
+	if err != nil {
+		t.Fatalf("open corrupted WAL: %v", err)
+	}
+	defer reader.Close()
+
+	pointer := sourcePointer{Segment: 1, Offset: 0}
+	_, err = readSourceRecord(reader, pointer)
+	if err == nil {
+		t.Fatalf("expected bounds check error for huge compressed length")
+	}
+	if !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("expected exceeds limit error, got: %v", err)
+	}
+}
+
 func TestRemoveLocalShardFilesAndShardStorageSize(t *testing.T) {
 	s := New(Config{
 		Mode:              "both",

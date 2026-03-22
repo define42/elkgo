@@ -89,6 +89,11 @@ func TestEmbeddedEtcdLifecycle_WatchesAndRepairState(t *testing.T) {
 		policy, ok := s.getIndexRetentionPolicy("policy-only")
 		return ok && policy.RetentionDays == 30, nil
 	})
+	deleteEtcdKey(t, client, s.indexRetentionKey(retentionPolicy.IndexName))
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "index retention watch delete", func() (bool, error) {
+		_, ok := s.getIndexRetentionPolicy("policy-only")
+		return !ok, nil
+	})
 
 	repairState := ReplicaRepairState{
 		IndexName: route.IndexName,
@@ -101,6 +106,10 @@ func TestEmbeddedEtcdLifecycle_WatchesAndRepairState(t *testing.T) {
 		putEtcdJSON(t, client, s.replicaRepairKey(route.IndexName, route.Day, route.ShardID, "n2"), repairState)
 		return s.replicaNeedsRepair(route.IndexName, route.Day, route.ShardID, "n2"), nil
 	})
+	deleteEtcdKey(t, client, s.replicaRepairKey(route.IndexName, route.Day, route.ShardID, "n2"))
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "replica repair watch delete", func() (bool, error) {
+		return !s.replicaNeedsRepair(route.IndexName, route.Day, route.ShardID, "n2"), nil
+	})
 
 	offlineState := NodeOfflineState{
 		NodeID:       "n9",
@@ -111,6 +120,11 @@ func TestEmbeddedEtcdLifecycle_WatchesAndRepairState(t *testing.T) {
 		putEtcdJSON(t, client, s.offlinePrefix+"n9", offlineState)
 		_, ok := s.snapshotOfflineStates()["n9"]
 		return ok, nil
+	})
+	deleteEtcdKey(t, client, s.offlinePrefix+"n9")
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "offline watch delete", func() (bool, error) {
+		_, ok := s.snapshotOfflineStates()["n9"]
+		return !ok, nil
 	})
 
 	deleteEtcdKey(t, client, s.memberPrefix+"n2")
@@ -137,6 +151,11 @@ func TestEmbeddedEtcdLifecycle_WatchesAndRepairState(t *testing.T) {
 	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "obsolete replica repair state cleanup", func() (bool, error) {
 		putEtcdJSON(t, client, s.routingKey(route.IndexName, route.Day, route.ShardID), route)
 		return !s.replicaNeedsRepair(route.IndexName, route.Day, route.ShardID, "n2"), nil
+	})
+	deleteEtcdKey(t, client, s.routingKey(route.IndexName, route.Day, route.ShardID))
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "routing watch delete", func() (bool, error) {
+		_, ok := s.getRouting(route.IndexName, route.Day, route.ShardID)
+		return !ok, nil
 	})
 
 	missingReplicaRoute := RoutingEntry{
@@ -629,6 +648,65 @@ func TestAutoDrainResumeAndRun_WithEmbeddedEtcd(t *testing.T) {
 	if len(resp.Kvs) != 1 {
 		t.Fatalf("expected Run to register member before listen failure, got %d entries", len(resp.Kvs))
 	}
+}
+
+func TestBootstrapAndRebalanceHelpers_WithEmbeddedEtcd(t *testing.T) {
+	cluster := startEmbeddedEtcd(t)
+
+	coordinator := newEtcdBackedServer(t, cluster.endpoint, "n1", "coordinator", "http://127.0.0.1:18121")
+	member2 := newEtcdBackedServer(t, cluster.endpoint, "n2", "both", "http://127.0.0.1:18122")
+	mustRegisterAndLoadServerState(t, coordinator)
+	mustRegisterAndLoadServerState(t, member2)
+	if err := coordinator.loadMembers(context.Background()); err != nil {
+		t.Fatalf("coordinator loadMembers before bootstrap: %v", err)
+	}
+
+	day := "2026-03-28"
+	routes, err := coordinator.bootstrapRouting(context.Background(), "events", day, 5, 0)
+	if err != nil {
+		t.Fatalf("bootstrapRouting: %v", err)
+	}
+	if len(routes) != coordinator.defaultShardsPerDay {
+		t.Fatalf("expected %d routes from bootstrap, got %d", coordinator.defaultShardsPerDay, len(routes))
+	}
+	for _, route := range routes {
+		if len(route.Replicas) != 2 {
+			t.Fatalf("expected replication factor to clamp to 2, got route %#v", route)
+		}
+	}
+
+	coordinator.offlineMu.Lock()
+	coordinator.offlineStates["n9"] = NodeOfflineState{
+		NodeID:       "n9",
+		MissingSince: time.Now().UTC().Format(time.RFC3339),
+	}
+	coordinator.offlineMu.Unlock()
+	before := coordinator.snapshotRouting()
+	coordinator.maybeRebalanceRouting(context.Background())
+	after := coordinator.snapshotRouting()
+	if len(before) != len(after) {
+		t.Fatalf("expected recent offline marker to prevent rebalance changes")
+	}
+
+	coordinator.offlineMu.Lock()
+	delete(coordinator.offlineStates, "n9")
+	coordinator.offlineMu.Unlock()
+
+	member3 := newEtcdBackedServer(t, cluster.endpoint, "n3", "both", "http://127.0.0.1:18123")
+	mustRegisterAndLoadServerState(t, member3)
+	if err := coordinator.loadMembers(context.Background()); err != nil {
+		t.Fatalf("loadMembers after n3 register: %v", err)
+	}
+
+	coordinator.maybeRebalanceRouting(context.Background())
+	waitForTestCondition(t, 15*time.Second, 25*time.Millisecond, "rebalance onto new member", func() (bool, error) {
+		for _, route := range coordinator.snapshotRouting() {
+			if routeHasReplica(route, "n3") {
+				return true, nil
+			}
+		}
+		return false, nil
+	})
 }
 
 func TestRunAndClose_GracefulShutdownAndTimeouts(t *testing.T) {

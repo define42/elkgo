@@ -1271,8 +1271,9 @@ const HomePageHTML = `<!DOCTYPE html>
 
     function renderSummary(data) {
       summaryEl.innerHTML = "";
+      const indexLabel = data.index === "_all" ? "all indexes" : data.index;
       const pills = [
-        "index: " + data.index,
+        "index: " + indexLabel,
         "days: " + (Array.isArray(data.days) ? data.days.join(", ") : ""),
         "hits: " + (Array.isArray(data.hits) ? data.hits.length : 0),
         "k: " + data.k
@@ -1342,11 +1343,23 @@ const HomePageHTML = `<!DOCTYPE html>
 
     function applySuggestedDay() {
       if (fields.day_from.value || fields.day_to.value) return;
-      const match = availableIndexes.find(function (entry) {
-        return entry.name === fields.index.value;
-      });
-      if (!match || !Array.isArray(match.days) || match.days.length === 0) return;
-      const latestDay = match.days[match.days.length - 1];
+      let latestDay = "";
+      if (fields.index.value && fields.index.value !== "_all") {
+        const match = availableIndexes.find(function (entry) {
+          return entry.name === fields.index.value;
+        });
+        if (!match || !Array.isArray(match.days) || match.days.length === 0) return;
+        latestDay = match.days[match.days.length - 1];
+      } else {
+        availableIndexes.forEach(function (entry) {
+          if (!Array.isArray(entry.days) || entry.days.length === 0) return;
+          const candidate = entry.days[entry.days.length - 1];
+          if (!latestDay || candidate > latestDay) {
+            latestDay = candidate;
+          }
+        });
+        if (!latestDay) return;
+      }
       fields.day_from.value = latestDay;
       fields.day_to.value = latestDay;
     }
@@ -1364,8 +1377,8 @@ const HomePageHTML = `<!DOCTYPE html>
 
       fields.index.disabled = false;
       const placeholder = document.createElement("option");
-      placeholder.value = "";
-      placeholder.textContent = "Select an index";
+      placeholder.value = "_all";
+      placeholder.textContent = "All indexes";
       fields.index.appendChild(placeholder);
 
       availableIndexes.forEach(function (entry) {
@@ -1380,12 +1393,14 @@ const HomePageHTML = `<!DOCTYPE html>
         return entry.name + days;
       }).join(" | ");
 
-      if (pendingIndexValue && availableIndexes.some(function (entry) { return entry.name === pendingIndexValue; })) {
+      if (pendingIndexValue === "" || pendingIndexValue === "_all") {
+        fields.index.value = "_all";
+      } else if (pendingIndexValue && availableIndexes.some(function (entry) { return entry.name === pendingIndexValue; })) {
         fields.index.value = pendingIndexValue;
-      } else if (availableIndexes.length === 1) {
-        fields.index.value = availableIndexes[0].name;
+      } else if (availableIndexes.length > 1) {
+        fields.index.value = "_all";
       } else {
-        fields.index.value = "";
+        fields.index.value = availableIndexes[0].name;
       }
       pendingIndexValue = "";
       applySuggestedDay();
@@ -1406,11 +1421,6 @@ const HomePageHTML = `<!DOCTYPE html>
 
     async function runSearch(pushState) {
       const params = paramsFromForm();
-      if (!params.get("index")) {
-        setStatus("Index is required.", true);
-        return;
-      }
-
       setStatus("Searching across assigned shards...");
       resultsEl.innerHTML = '<div class="empty">Loading results...</div>';
       errorsEl.innerHTML = "";

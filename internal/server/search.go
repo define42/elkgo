@@ -16,11 +16,7 @@ import (
 )
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
-	indexName := strings.TrimSpace(r.URL.Query().Get("index"))
-	if indexName == "" {
-		http.Error(w, "missing index", http.StatusBadRequest)
-		return
-	}
+	indexName := normalizeSearchIndexScope(r.URL.Query().Get("index"))
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	k := 10
 	if raw := r.URL.Query().Get("k"); raw != "" {
@@ -69,7 +65,16 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if len(allHits) > k {
 		allHits = allHits[:k]
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"index": indexName, "days": days, "query": q, "k": k, "hits": allHits, "partial_errors": partial, "shards_per_day": enforcedShardsPerDay})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"index":          searchIndexLabel(indexName),
+		"indexes":        targetIndexNames(targets),
+		"days":           days,
+		"query":          q,
+		"k":              k,
+		"hits":           allHits,
+		"partial_errors": partial,
+		"shards_per_day": enforcedShardsPerDay,
+	})
 }
 
 func (s *Server) searchShard(ctx context.Context, target RoutingEntry, q string, k int) ([]ShardHit, error) {
@@ -181,7 +186,7 @@ func collectTargets(routes map[string]RoutingEntry, indexName string, days []str
 	}
 	out := make([]RoutingEntry, 0)
 	for _, rt := range routes {
-		if rt.IndexName != indexName {
+		if indexName != "" && rt.IndexName != indexName {
 			continue
 		}
 		if _, ok := daySet[rt.Day]; !ok {
@@ -190,10 +195,44 @@ func collectTargets(routes map[string]RoutingEntry, indexName string, days []str
 		out = append(out, rt)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Day == out[j].Day {
-			return out[i].ShardID < out[j].ShardID
+		if out[i].IndexName == out[j].IndexName {
+			if out[i].Day == out[j].Day {
+				return out[i].ShardID < out[j].ShardID
+			}
+			return out[i].Day < out[j].Day
 		}
-		return out[i].Day < out[j].Day
+		return out[i].IndexName < out[j].IndexName
 	})
 	return out
+}
+
+func normalizeSearchIndexScope(indexName string) string {
+	indexName = strings.TrimSpace(indexName)
+	switch strings.ToLower(indexName) {
+	case "", "*", "_all", "all":
+		return ""
+	default:
+		return indexName
+	}
+}
+
+func searchIndexLabel(indexName string) string {
+	if indexName == "" {
+		return "_all"
+	}
+	return indexName
+}
+
+func targetIndexNames(targets []RoutingEntry) []string {
+	seen := make(map[string]struct{}, len(targets))
+	indexes := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if _, ok := seen[target.IndexName]; ok {
+			continue
+		}
+		seen[target.IndexName] = struct{}{}
+		indexes = append(indexes, target.IndexName)
+	}
+	sort.Strings(indexes)
+	return indexes
 }

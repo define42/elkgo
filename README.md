@@ -83,6 +83,7 @@ At a high level:
 The search page supports:
 
 - index selection
+- an all-index search scope
 - `day_from` and `day_to`
 - free-text Bleve query syntax
 - blank query for match-all
@@ -252,7 +253,8 @@ GET /search?index=events&day_from=2026-03-15&day_to=2026-03-21&q=service:api
 
 Rules:
 
-- `index` is required
+- `index` is optional
+- omit `index`, or use `index=_all`, to search across all indexes
 - both `day_from` and `day_to` are required
 - for a single day search, set `day_from` and `day_to` to the same date
 - `q` may be empty for match-all
@@ -347,6 +349,12 @@ Across a day range:
 
 ```bash
 curl 'http://127.0.0.1:8081/search?index=events&day_from=2026-03-15&day_to=2026-03-21&q=service:api'
+```
+
+Across all indexes in a day range:
+
+```bash
+curl 'http://127.0.0.1:8081/search?index=_all&day_from=2026-03-15&day_to=2026-03-21&q=timeout'
 ```
 
 ### Notes About Search Semantics

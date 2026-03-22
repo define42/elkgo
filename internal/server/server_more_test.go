@@ -69,6 +69,9 @@ func TestHandleHealthAndStaticPages(t *testing.T) {
 			if strings.Contains(body, `id="day"`) {
 				t.Fatalf("%s %s: expected legacy single-day input to be removed", tc.method, tc.path)
 			}
+			if !strings.Contains(body, "All indexes") {
+				t.Fatalf("%s %s: expected all-index search option", tc.method, tc.path)
+			}
 		}
 		if tc.path == "/cluster" && tc.method == http.MethodGet && !strings.Contains(body, "Index retention") {
 			t.Fatalf("%s %s: expected body to contain %q", tc.method, tc.path, "Index retention")

@@ -108,6 +108,63 @@ func TestHandleSearch_RequiresDayFromAndDayTo(t *testing.T) {
 	_ = s
 }
 
+func TestHandleSearch_AllIndexesScope(t *testing.T) {
+	s, ts := newTestHTTPServer(t)
+
+	day := "2026-03-21"
+	setTestRoute(s, "events", day, 0, []string{"n1"})
+	setTestRoute(s, "metrics", day, 0, []string{"n1"})
+
+	indexTestDocument(t, s, "events", day, 0, "evt-1", Document{
+		"id":        "evt-1",
+		"timestamp": day + "T10:00:00Z",
+		"message":   "shared token from events",
+	})
+	indexTestDocument(t, s, "metrics", day, 0, "met-1", Document{
+		"id":        "met-1",
+		"timestamp": day + "T10:05:00Z",
+		"message":   "shared token from metrics",
+	})
+
+	searchURL := ts.URL + "/search?index=_all&day_from=" + url.QueryEscape(day) + "&day_to=" + url.QueryEscape(day) + "&q=" + url.QueryEscape("shared token") + "&k=10"
+	resp, err := http.Get(searchURL)
+	if err != nil {
+		t.Fatalf("all-index search request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		Index   string     `json:"index"`
+		Indexes []string   `json:"indexes"`
+		Hits    []ShardHit `json:"hits"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode all-index search response: %v", err)
+	}
+
+	if payload.Index != "_all" {
+		t.Fatalf("expected index _all, got %q", payload.Index)
+	}
+	if !reflect.DeepEqual(payload.Indexes, []string{"events", "metrics"}) {
+		t.Fatalf("unexpected indexes list: %#v", payload.Indexes)
+	}
+	if len(payload.Hits) != 2 {
+		t.Fatalf("expected 2 hits, got %d", len(payload.Hits))
+	}
+
+	gotByIndex := make(map[string]string, len(payload.Hits))
+	for _, hit := range payload.Hits {
+		gotByIndex[hit.Index] = hit.DocID
+	}
+	if !reflect.DeepEqual(gotByIndex, map[string]string{"events": "evt-1", "metrics": "met-1"}) {
+		t.Fatalf("unexpected all-index hits: %#v", gotByIndex)
+	}
+}
+
 func TestHandleBulkIngest_NDJSONIndexesDocuments(t *testing.T) {
 	s, ts := newTestHTTPServer(t)
 

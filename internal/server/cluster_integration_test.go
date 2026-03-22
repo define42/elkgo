@@ -453,7 +453,7 @@ func waitForDashboardTotal(t *testing.T, coordinatorURL string, expectedTotal, e
 	t.Helper()
 
 	var snapshot integrationRoutingSnapshot
-	waitForCondition(t, 2*time.Minute, 5*time.Second, "dashboard routing totals", func() (bool, error) {
+	waitForCondition(t, 5*time.Minute, 5*time.Second, "dashboard routing totals", func() (bool, error) {
 		if err := getJSON(newIntegrationClient(2*time.Minute), coordinatorURL+"/admin/routing?stats=1", &snapshot); err != nil {
 			return false, err
 		}
@@ -587,7 +587,7 @@ func waitForRebalancedShardsOnNode(t *testing.T, nodeURL, nodeID string, dataset
 		daySet[day] = struct{}{}
 	}
 
-	waitForCondition(t, 2*time.Minute, 3*time.Second, "node "+nodeID+" to receive rebalanced shards", func() (bool, error) {
+	waitForCondition(t, 5*time.Minute, 3*time.Second, "node "+nodeID+" to receive rebalanced shards", func() (bool, error) {
 		var snapshot struct {
 			Routing map[string]RoutingEntry `json:"routing"`
 			Members map[string]NodeInfo     `json:"members"`

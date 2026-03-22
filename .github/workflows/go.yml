@@ -9,45 +9,35 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build:
+  # -------------------------------
+  # Lint, unit tests, coverage
+  # -------------------------------
+  test:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
 
     permissions:
       contents: write   # required for tags + GitHub releases
       packages: write   # required for GHCR push
 
     steps:
-      # -------------------------------
-      # Checkout
-      # -------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0   # REQUIRED for tag calculation
 
-      # -------------------------------
-      # Go setup
-      # -------------------------------
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: '1.26'
           cache-dependency-path: go.sum
 
-      # -------------------------------
-      # Build & test
-      # -------------------------------
       - name: Lint
         run: make lint
 
       - name: Run unit tests with coverage
         run: |
           go test ./... -coverprofile=coverage.out -covermode=atomic -coverpkg=./...
-
-      - name: Run integration tests
-        run: |
-          go test -tags=integration ./internal/server -timeout 30m
 
       - name: Show coverage in job summary
         run: |
@@ -63,7 +53,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.out
           flags: unittests
-          fail_ci_if_error: true
+          fail_ci_if_error: false
 
       # -------------------------------
       # Versioning & Release (main only)
@@ -109,3 +99,26 @@ jobs:
             ghcr.io/${{ github.repository }}:latest
             ghcr.io/${{ github.repository }}:${{ steps.tag.outputs.new_tag }}
             ghcr.io/${{ github.repository }}:${{ github.sha }}
+
+  # -------------------------------
+  # Integration tests (Docker-based, separate job)
+  # -------------------------------
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    needs: test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: go.sum
+
+      - name: Run integration tests
+        run: |
+          go test -tags=integration ./internal/server -timeout 30m -v

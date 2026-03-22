@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/blevesearch/bleve/v2"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -79,10 +81,27 @@ type SearchShardRequest struct {
 	ShardID   int    `json:"shard_id"`
 	Query     string `json:"query"`
 	K         int    `json:"k"`
+	FetchDocs bool   `json:"fetch_docs,omitempty"`
 }
 
 type SearchShardResponse struct {
 	Hits []ShardHit `json:"hits"`
+}
+
+type FetchDocsRequest struct {
+	IndexName string   `json:"index_name"`
+	Day       string   `json:"day"`
+	ShardID   int      `json:"shard_id"`
+	DocIDs    []string `json:"doc_ids"`
+}
+
+type FetchedDocument struct {
+	DocID  string   `json:"doc_id"`
+	Source Document `json:"source"`
+}
+
+type FetchDocsResponse struct {
+	Docs []FetchedDocument `json:"docs"`
 }
 
 type internalIndexRequest struct {
@@ -94,8 +113,9 @@ type internalIndexRequest struct {
 }
 
 type internalIndexBatchItem struct {
-	DocID string   `json:"doc_id"`
-	Doc   Document `json:"doc"`
+	DocID string          `json:"doc_id"`
+	Doc   Document        `json:"doc,omitempty"`
+	Raw   json.RawMessage `json:"raw,omitempty"`
 }
 
 type internalIndexBatchRequest struct {
@@ -201,6 +221,8 @@ type Server struct {
 	routingMu            sync.RWMutex
 	routing              map[string]RoutingEntry
 	partitionShardCounts map[string]int
+	routingByIndexDay    map[string][]RoutingEntry
+	routingByDay         map[string][]RoutingEntry
 
 	membersMu sync.RWMutex
 	members   map[string]NodeInfo
@@ -208,10 +230,14 @@ type Server struct {
 	replicationFactor    int
 	defaultShardsPerDay  int
 	shardSyncConcurrency int
+	searchAdmission      chan struct{}
+	maxOpenShardIndexes  int
+	indexCacheMinIdle    time.Duration
 	routingPrefix        string
 	memberPrefix         string
 	drainPrefix          string
 	offlinePrefix        string
 	indexRetentionPrefix string
 	replicaRepairPrefix  string
+	indexLastAccess      map[string]time.Time
 }

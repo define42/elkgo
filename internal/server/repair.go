@@ -297,6 +297,13 @@ func (s *Server) repairReplicaLoop(indexName, day string, shardID int, nodeID st
 }
 
 func (s *Server) repairReplica(route RoutingEntry, nodeID string) error {
+	ctx, cancel := context.WithTimeout(s.backgroundCtx, shardSyncTimeout)
+	defer cancel()
+
+	if err := s.transferShardSnapshotToReplica(ctx, route, nodeID); err == nil {
+		return nil
+	}
+
 	_, err := s.streamShardToReplica(route, nodeID)
 	return err
 }

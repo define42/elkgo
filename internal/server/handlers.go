@@ -314,7 +314,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var doc Document
-	if err := json.NewDecoder(r.Body).Decode(&doc); err != nil {
+	if err := decodeJSONRequest(r, &doc); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -332,7 +332,7 @@ func (s *Server) handleInternalIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req internalIndexRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONRequest(r, &req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -497,6 +497,43 @@ func (s *Server) handleSnapshotShard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+}
+
+func (s *Server) handleInstallSnapshotShard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	indexName := strings.TrimSpace(r.URL.Query().Get("index"))
+	day := strings.TrimSpace(r.URL.Query().Get("day"))
+	shardID, err := strconv.Atoi(r.URL.Query().Get("shard"))
+	if err != nil {
+		http.Error(w, "missing or invalid shard", http.StatusBadRequest)
+		return
+	}
+	if !s.ownsReplica(indexName, day, shardID) {
+		http.Error(w, "replica not assigned", http.StatusForbidden)
+		return
+	}
+	reader, err := requestBodyReader(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer reader.Close()
+
+	if err := s.installShardSnapshot(indexName, day, shardID, reader, true); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"index":    indexName,
+		"day":      day,
+		"shard_id": shardID,
+		"replaced": true,
+		"node_id":  s.nodeID,
+	})
 }
 
 func (s *Server) handleShardStats(w http.ResponseWriter, r *http.Request) {

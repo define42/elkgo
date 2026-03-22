@@ -75,8 +75,40 @@ func shardCountsFromRouting(routes map[string]RoutingEntry) map[string]int {
 	return out
 }
 
+func buildRoutingLookups(routes map[string]RoutingEntry) (map[string]int, map[string][]RoutingEntry, map[string][]RoutingEntry) {
+	partitionCounts := make(map[string]int)
+	byIndexDay := make(map[string][]RoutingEntry)
+	byDay := make(map[string][]RoutingEntry)
+
+	for _, route := range routes {
+		partitionKey := partitionDayKey(route.IndexName, route.Day)
+		count := route.ShardID + 1
+		if count > partitionCounts[partitionKey] {
+			partitionCounts[partitionKey] = count
+		}
+		byIndexDay[partitionKey] = append(byIndexDay[partitionKey], route)
+		byDay[route.Day] = append(byDay[route.Day], route)
+	}
+
+	for key := range byIndexDay {
+		sort.Slice(byIndexDay[key], func(i, j int) bool {
+			return byIndexDay[key][i].ShardID < byIndexDay[key][j].ShardID
+		})
+	}
+	for day := range byDay {
+		sort.Slice(byDay[day], func(i, j int) bool {
+			if byDay[day][i].IndexName == byDay[day][j].IndexName {
+				return byDay[day][i].ShardID < byDay[day][j].ShardID
+			}
+			return byDay[day][i].IndexName < byDay[day][j].IndexName
+		})
+	}
+
+	return partitionCounts, byIndexDay, byDay
+}
+
 func maxShardCountFromRouting(routes map[string]RoutingEntry, fallback int) int {
-	counts := shardCountsFromRouting(routes)
+	counts, _, _ := buildRoutingLookups(routes)
 	maxCount := fallback
 	for _, count := range counts {
 		if count > maxCount {
@@ -95,6 +127,21 @@ func maxShardCountFromTargets(targets []RoutingEntry, fallback int) int {
 		}
 	}
 	return maxCount
+}
+
+func (s *Server) collectSearchTargets(indexName string, days []string) []RoutingEntry {
+	s.routingMu.RLock()
+	defer s.routingMu.RUnlock()
+
+	out := make([]RoutingEntry, 0)
+	for _, day := range days {
+		if indexName == "" {
+			out = append(out, s.routingByDay[day]...)
+			continue
+		}
+		out = append(out, s.routingByIndexDay[partitionDayKey(indexName, day)]...)
+	}
+	return out
 }
 
 func (s *Server) snapshotMembers() map[string]NodeInfo {

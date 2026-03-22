@@ -1,7 +1,7 @@
 package server
 
 import (
-	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,15 +12,10 @@ import (
 )
 
 func (s *Server) postJSON(ctx context.Context, url string, body any, out any) error {
-	buf := new(bytes.Buffer)
-	if err := json.NewEncoder(buf).Encode(body); err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, buf)
+	req, err := newStreamingJSONRequest(ctx, http.MethodPost, url, body, true)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return err
@@ -38,15 +33,10 @@ func (s *Server) postJSON(ctx context.Context, url string, body any, out any) er
 }
 
 func (s *Server) postJSONStatus(ctx context.Context, url string, body any, out any) (int, error) {
-	buf := new(bytes.Buffer)
-	if err := json.NewEncoder(buf).Encode(body); err != nil {
-		return 0, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, buf)
+	req, err := newStreamingJSONRequest(ctx, http.MethodPost, url, body, true)
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("Content-Type", "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return 0, err
@@ -87,18 +77,10 @@ func (s *Server) postNDJSONWithTimeout(ctx context.Context, url string, docs []D
 }
 
 func postNDJSONWithClient(ctx context.Context, client *http.Client, url string, docs []Document, out any) error {
-	buf := new(bytes.Buffer)
-	enc := json.NewEncoder(buf)
-	for _, doc := range docs {
-		if err := enc.Encode(doc); err != nil {
-			return err
-		}
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, buf)
+	req, err := newStreamingNDJSONRequest(ctx, url, docs, true)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/x-ndjson")
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -176,6 +158,107 @@ func getJSONWithClient(ctx context.Context, client *http.Client, url string, out
 		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func newStreamingJSONRequest(ctx context.Context, method, url string, body any, compress bool) (*http.Request, error) {
+	requestBody, headers := newStreamingRequestBody(func(writer io.Writer) error {
+		return json.NewEncoder(writer).Encode(body)
+	}, "application/json", compress)
+	req, err := http.NewRequestWithContext(ctx, method, url, requestBody)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	return req, nil
+}
+
+func newStreamingNDJSONRequest(ctx context.Context, url string, docs []Document, compress bool) (*http.Request, error) {
+	requestBody, headers := newStreamingRequestBody(func(writer io.Writer) error {
+		enc := json.NewEncoder(writer)
+		for _, doc := range docs {
+			if err := enc.Encode(doc); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, "application/x-ndjson", compress)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, requestBody)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	return req, nil
+}
+
+func newStreamingRequestBody(encode func(io.Writer) error, contentType string, compress bool) (io.ReadCloser, map[string]string) {
+	pr, pw := io.Pipe()
+	headers := map[string]string{
+		"Content-Type": contentType,
+	}
+	if compress {
+		headers["Content-Encoding"] = "gzip"
+	}
+
+	go func() {
+		var err error
+		if compress {
+			gzipWriter := gzip.NewWriter(pw)
+			err = encode(gzipWriter)
+			if closeErr := gzipWriter.Close(); err == nil && closeErr != nil {
+				err = closeErr
+			}
+		} else {
+			err = encode(pw)
+		}
+		_ = pw.CloseWithError(err)
+	}()
+
+	return pr, headers
+}
+
+func requestBodyReader(r *http.Request) (io.ReadCloser, error) {
+	if !strings.Contains(strings.ToLower(r.Header.Get("Content-Encoding")), "gzip") {
+		return r.Body, nil
+	}
+	reader, err := gzip.NewReader(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	return &compositeReadCloser{
+		Reader: reader,
+		closers: []io.Closer{
+			reader,
+			r.Body,
+		},
+	}, nil
+}
+
+func decodeJSONRequest(r *http.Request, out any) error {
+	reader, err := requestBodyReader(r)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	return json.NewDecoder(reader).Decode(out)
+}
+
+type compositeReadCloser struct {
+	io.Reader
+	closers []io.Closer
+}
+
+func (c *compositeReadCloser) Close() error {
+	var firstErr error
+	for _, closer := range c.closers {
+		if err := closer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

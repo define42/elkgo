@@ -205,11 +205,13 @@ func (s *Server) loadRouting(ctx context.Context) error {
 		}
 		routing[routingMapKey(rt.IndexName, rt.Day, rt.ShardID)] = rt
 	}
-	partitionShardCounts := shardCountsFromRouting(routing)
+	partitionShardCounts, routingByIndexDay, routingByDay := buildRoutingLookups(routing)
 	s.routingMu.Lock()
 	oldRouting := s.routing
 	s.routing = routing
 	s.partitionShardCounts = partitionShardCounts
+	s.routingByIndexDay = routingByIndexDay
+	s.routingByDay = routingByDay
 	s.routingMu.Unlock()
 	s.clearReplicaCache()
 	s.syncAssignedShardsAsync(oldRouting, routing)

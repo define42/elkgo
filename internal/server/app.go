@@ -11,11 +11,14 @@ import (
 )
 
 const (
-	serverReadHeaderTimeout = 5 * time.Second
-	serverReadTimeout       = 2 * time.Minute
-	serverWriteTimeout      = 2 * time.Minute
-	serverIdleTimeout       = 2 * time.Minute
-	serverShutdownTimeout   = 10 * time.Second
+	serverReadHeaderTimeout    = 5 * time.Second
+	serverReadTimeout          = 2 * time.Minute
+	serverWriteTimeout         = 2 * time.Minute
+	serverIdleTimeout          = 2 * time.Minute
+	serverShutdownTimeout      = 10 * time.Second
+	defaultSearchRequestLimit  = 32
+	defaultMaxOpenShardIndexes = 512
+	defaultIndexCacheMinIdle   = 30 * time.Second
 )
 
 func New(cfg Config) *Server {
@@ -37,6 +40,8 @@ func New(cfg Config) *Server {
 		etcdEndpoints:          append([]string(nil), cfg.ETCDEndpoints...),
 		routing:                map[string]RoutingEntry{},
 		partitionShardCounts:   map[string]int{},
+		routingByIndexDay:      map[string][]RoutingEntry{},
+		routingByDay:           map[string][]RoutingEntry{},
 		members:                map[string]NodeInfo{},
 		drainStates:            map[string]NodeDrainState{},
 		offlineStates:          map[string]NodeOfflineState{},
@@ -47,12 +52,16 @@ func New(cfg Config) *Server {
 		replicationFactor:      cfg.ReplicationFactor,
 		defaultShardsPerDay:    normalizedDefaultShardsPerDay(cfg.DefaultShardsPerDay),
 		shardSyncConcurrency:   cfg.ShardSyncConcurrency,
+		searchAdmission:        make(chan struct{}, defaultSearchRequestLimit),
+		maxOpenShardIndexes:    defaultMaxOpenShardIndexes,
+		indexCacheMinIdle:      defaultIndexCacheMinIdle,
 		routingPrefix:          "/distsearch/routing/",
 		memberPrefix:           "/distsearch/members/",
 		drainPrefix:            "/distsearch/drain/",
 		offlinePrefix:          "/distsearch/offline/",
 		indexRetentionPrefix:   "/distsearch/index-retention/",
 		replicaRepairPrefix:    "/distsearch/replica-repair/",
+		indexLastAccess:        map[string]time.Time{},
 	}
 }
 
@@ -172,9 +181,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/internal/index", s.handleInternalIndex)
 	mux.HandleFunc("/internal/index_batch", s.handleInternalIndexBatch)
 	mux.HandleFunc("/internal/search_shard", s.handleSearchShard)
+	mux.HandleFunc("/internal/fetch_docs", s.handleFetchDocs)
 	mux.HandleFunc("/internal/dump_docs", s.handleDumpDocs)
 	mux.HandleFunc("/internal/stream_docs", s.handleStreamDocs)
 	mux.HandleFunc("/internal/snapshot_shard", s.handleSnapshotShard)
+	mux.HandleFunc("/internal/install_snapshot_shard", s.handleInstallSnapshotShard)
 	mux.HandleFunc("/internal/shard_stats", s.handleShardStats)
 }
 

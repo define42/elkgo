@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -66,6 +67,29 @@ func (s *Server) dumpAllDocs(idx bleve.Index) ([]Document, error) {
 
 func shardEventCount(idx bleve.Index) (uint64, error) {
 	return idx.DocCount()
+}
+
+func fetchDocumentsByID(idx bleve.Index, docIDs []string) (map[string]Document, error) {
+	if len(docIDs) == 0 {
+		return map[string]Document{}, nil
+	}
+
+	req := bleve.NewSearchRequestOptions(bleve.NewDocIDQuery(docIDs), len(docIDs), 0, false)
+	req.Fields = []string{"*"}
+	searchResult, err := idx.Search(req)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make(map[string]Document, len(searchResult.Hits))
+	for _, hit := range searchResult.Hits {
+		doc := docFromBleveFields(hit.Fields)
+		if _, ok := doc["id"]; !ok {
+			doc["id"] = hit.ID
+		}
+		out[hit.ID] = doc
+	}
+	return out, nil
 }
 
 func pathSizeBytes(path string) (uint64, error) {
@@ -156,11 +180,13 @@ func (s *Server) openShardIndexWithMode(indexName, day string, shardID int, crea
 	idx, ok := s.indexes[cacheKey]
 	s.mu.RUnlock()
 	if ok {
+		s.touchIndexCache(cacheKey)
 		return idx, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if idx, ok := s.indexes[cacheKey]; ok {
+		s.indexLastAccess[cacheKey] = time.Now()
 		return idx, nil
 	}
 	path := s.shardIndexPath(indexName, day, shardID)
@@ -183,6 +209,8 @@ func (s *Server) openShardIndexWithMode(indexName, day string, shardID int, crea
 		return nil, err
 	}
 	s.indexes[cacheKey] = idx
+	s.indexLastAccess[cacheKey] = time.Now()
+	s.trimIndexCacheLocked(cacheKey)
 	return idx, nil
 }
 
@@ -196,6 +224,7 @@ func (s *Server) removeLocalShardDay(indexName, day string) error {
 		}
 		_ = idx.Close()
 		delete(s.indexes, key)
+		delete(s.indexLastAccess, key)
 	}
 	s.mu.Unlock()
 
@@ -211,6 +240,71 @@ func (s *Server) removeLocalShardDay(indexName, day string) error {
 		}
 	}
 	return nil
+}
+
+func (s *Server) closeCachedShardIndex(indexName, day string, shardID int) error {
+	cacheKey := partitionKey(indexName, day, shardID)
+
+	s.mu.Lock()
+	idx, ok := s.indexes[cacheKey]
+	if ok {
+		delete(s.indexes, cacheKey)
+	}
+	delete(s.indexLastAccess, cacheKey)
+	s.mu.Unlock()
+
+	if ok {
+		return idx.Close()
+	}
+	return nil
+}
+
+func (s *Server) touchIndexCache(cacheKey string) {
+	s.mu.Lock()
+	if _, ok := s.indexes[cacheKey]; ok {
+		s.indexLastAccess[cacheKey] = time.Now()
+	}
+	s.mu.Unlock()
+}
+
+func (s *Server) trimIndexCacheLocked(protectedKey string) {
+	if s.maxOpenShardIndexes <= 0 || len(s.indexes) <= s.maxOpenShardIndexes {
+		return
+	}
+
+	type candidate struct {
+		key      string
+		accessed time.Time
+	}
+
+	now := time.Now()
+	candidates := make([]candidate, 0, len(s.indexes))
+	for key := range s.indexes {
+		if key == protectedKey {
+			continue
+		}
+		accessed := s.indexLastAccess[key]
+		if !accessed.IsZero() && now.Sub(accessed) < s.indexCacheMinIdle {
+			continue
+		}
+		candidates = append(candidates, candidate{key: key, accessed: accessed})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].accessed.Before(candidates[j].accessed)
+	})
+
+	for _, candidate := range candidates {
+		if len(s.indexes) <= s.maxOpenShardIndexes {
+			return
+		}
+		idx, ok := s.indexes[candidate.key]
+		if !ok {
+			continue
+		}
+		_ = idx.Close()
+		delete(s.indexes, candidate.key)
+		delete(s.indexLastAccess, candidate.key)
+	}
 }
 
 func buildIndexMapping() blevemapping.IndexMapping {

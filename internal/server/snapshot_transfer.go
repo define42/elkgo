@@ -205,6 +205,108 @@ func (s *Server) restoreShardSnapshotFromURL(ctx context.Context, route RoutingE
 	return true, nil
 }
 
+func (s *Server) installShardSnapshot(indexName, day string, shardID int, archive io.Reader, replaceExisting bool) error {
+	livePath := s.shardIndexPath(indexName, day, shardID)
+	parentDir := filepath.Dir(livePath)
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		return err
+	}
+
+	tempDir, err := os.MkdirTemp(parentDir, fmt.Sprintf("shard-%02d-install-", shardID))
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tempDir)
+
+	tempArchivePath := filepath.Join(tempDir, "snapshot.zip")
+	tempArchive, err := os.Create(tempArchivePath)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(tempArchive, archive); err != nil {
+		_ = tempArchive.Close()
+		return err
+	}
+	if err := tempArchive.Close(); err != nil {
+		return err
+	}
+
+	tempIndexPath := filepath.Join(tempDir, filepath.Base(livePath))
+	if err := extractSnapshotArchive(tempArchivePath, tempIndexPath); err != nil {
+		return err
+	}
+
+	if replaceExisting {
+		if err := s.closeCachedShardIndex(indexName, day, shardID); err != nil {
+			return err
+		}
+		if err := os.RemoveAll(livePath); err != nil {
+			return err
+		}
+	} else if s.localShardExists(indexName, day, shardID) {
+		return nil
+	}
+
+	return os.Rename(tempIndexPath, livePath)
+}
+
+func (s *Server) transferShardSnapshotToReplica(ctx context.Context, route RoutingEntry, nodeID string) error {
+	addr, ok := s.memberAddr(nodeID)
+	if !ok {
+		return fmt.Errorf("replica not registered")
+	}
+
+	idx, err := s.openExistingShardIndex(route.IndexName, route.Day, route.ShardID)
+	if err != nil {
+		return err
+	}
+
+	archiveFile, err := os.CreateTemp("", fmt.Sprintf("elkgo-repair-shard-%02d-*.zip", route.ShardID))
+	if err != nil {
+		return err
+	}
+	archivePath := archiveFile.Name()
+	if err := archiveFile.Close(); err != nil {
+		return err
+	}
+	defer os.Remove(archivePath)
+
+	if err := writeShardSnapshotArchive(idx, archivePath); err != nil {
+		return err
+	}
+
+	archiveReader, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer archiveReader.Close()
+
+	requestURL := fmt.Sprintf(
+		"%s/internal/install_snapshot_shard?index=%s&day=%s&shard=%d",
+		addr,
+		url.QueryEscape(route.IndexName),
+		url.QueryEscape(route.Day),
+		route.ShardID,
+	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, archiveReader)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/zip")
+
+	resp, err := (&http.Client{Timeout: shardSyncTimeout}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
 func downloadSnapshotArchive(ctx context.Context, client *http.Client, snapshotURL string, timeout time.Duration, destPath string) error {
 	requestClient := client
 	if timeout > 0 {

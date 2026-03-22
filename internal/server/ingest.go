@@ -50,7 +50,14 @@ func (s *Server) handleBulkIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scanner := bufio.NewScanner(r.Body)
+	bodyReader, err := requestBodyReader(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer bodyReader.Close()
+
+	scanner := bufio.NewScanner(bodyReader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 
 	lineNo := 0
@@ -99,7 +106,7 @@ func (s *Server) handleBulkIngest(w http.ResponseWriter, r *http.Request) {
 			route:     route,
 			item: internalIndexBatchItem{
 				DocID: docID,
-				Doc:   doc,
+				Raw:   append([]byte(nil), []byte(line)...),
 			},
 		})
 	}
@@ -245,7 +252,7 @@ func (s *Server) handleInternalIndexBatch(w http.ResponseWriter, r *http.Request
 	}
 
 	var req internalIndexBatchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONRequest(r, &req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -443,23 +450,43 @@ func (s *Server) indexBatchLocal(indexName, day string, shardID int, items []int
 
 	batch := idx.NewBatch()
 	for _, item := range items {
-		docID := strings.TrimSpace(item.DocID)
-		if docID == "" {
-			normalizedDocID, normalizedDay, err := normalizeGenericDocument(item.Doc)
-			if err != nil {
-				return err
-			}
-			if normalizedDay != day {
-				return fmt.Errorf("document day %s does not match shard day %s", normalizedDay, day)
-			}
-			docID = normalizedDocID
+		docID, doc, err := materializeBatchItem(item, day)
+		if err != nil {
+			return err
 		}
-		if err := batch.Index(docID, item.Doc); err != nil {
+		if err := batch.Index(docID, doc); err != nil {
 			return err
 		}
 	}
 
 	return idx.Batch(batch)
+}
+
+func materializeBatchItem(item internalIndexBatchItem, day string) (string, Document, error) {
+	var doc Document
+	switch {
+	case len(item.Raw) > 0:
+		if err := json.Unmarshal(item.Raw, &doc); err != nil {
+			return "", nil, err
+		}
+	case item.Doc != nil:
+		doc = cloneDocument(item.Doc)
+	default:
+		return "", nil, errors.New("document is required")
+	}
+
+	normalizedDocID, normalizedDay, err := normalizeGenericDocument(doc)
+	if err != nil {
+		return "", nil, err
+	}
+	if normalizedDay != day {
+		return "", nil, fmt.Errorf("document day %s does not match shard day %s", normalizedDay, day)
+	}
+	docID := strings.TrimSpace(item.DocID)
+	if docID == "" {
+		docID = normalizedDocID
+	}
+	return docID, doc, nil
 }
 
 func appendBulkError(errorsOut *[]string, message string) {

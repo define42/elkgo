@@ -242,7 +242,7 @@ func TestHandleBulkIngest_BatchesReplicaWritesByShard(t *testing.T) {
 			t.Fatalf("unexpected replica path: %s", r.URL.Path)
 		}
 		var req internalIndexBatchRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodeJSONRequest(r, &req); err != nil {
 			t.Fatalf("decode replica batch request: %v", err)
 		}
 		if req.Replicate {
@@ -319,7 +319,7 @@ func TestHandleIndex_RemotePrimaryUsesBatchReplication(t *testing.T) {
 			primaryBatchCalls++
 
 			var req internalIndexBatchRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if err := decodeJSONRequest(r, &req); err != nil {
 				t.Fatalf("decode primary batch request: %v", err)
 			}
 			if !req.Replicate {
@@ -397,6 +397,8 @@ func TestHandleSearch_CachesReplicaAfterFailover(t *testing.T) {
 		case "/internal/search_shard":
 			n2SearchCalls++
 			http.Error(w, "search shard unavailable", http.StatusServiceUnavailable)
+		case "/internal/fetch_docs":
+			http.Error(w, "fetch docs unavailable", http.StatusServiceUnavailable)
 		case "/healthz":
 			n2HealthCalls++
 			http.Error(w, "unexpected health probe", http.StatusInternalServerError)
@@ -414,10 +416,16 @@ func TestHandleSearch_CachesReplicaAfterFailover(t *testing.T) {
 			n3SearchCalls++
 			writeJSON(w, http.StatusOK, SearchShardResponse{
 				Hits: []ShardHit{{
-					Index:  "events",
-					Day:    day,
-					Shard:  shardID,
-					Score:  1,
+					Index: "events",
+					Day:   day,
+					Shard: shardID,
+					Score: 1,
+					DocID: "cached-hit",
+				}},
+			})
+		case "/internal/fetch_docs":
+			writeJSON(w, http.StatusOK, FetchDocsResponse{
+				Docs: []FetchedDocument{{
 					DocID:  "cached-hit",
 					Source: Document{"id": "cached-hit", "message": "cached replica result"},
 				}},
@@ -517,6 +525,7 @@ func TestHandleIndex_PartialReplicaFailureSkipsStaleReplicaUntilRepair(t *testin
 
 	var staleSearchCalls atomic.Int32
 	var staleWritesEnabled atomic.Bool
+	var staleSnapshotInstalls atomic.Int32
 	stale, staleTS := newWrappedTestHTTPServer(t, "n3", func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
@@ -525,6 +534,12 @@ func TestHandleIndex_PartialReplicaFailureSkipsStaleReplicaUntilRepair(t *testin
 					http.Error(w, "replica write unavailable", http.StatusServiceUnavailable)
 					return
 				}
+			case "/internal/install_snapshot_shard":
+				if !staleWritesEnabled.Load() {
+					http.Error(w, "replica snapshot unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				staleSnapshotInstalls.Add(1)
 			case "/internal/search_shard":
 				staleSearchCalls.Add(1)
 			}
@@ -662,6 +677,9 @@ func TestHandleIndex_PartialReplicaFailureSkipsStaleReplicaUntilRepair(t *testin
 	}
 	if staleSearchCalls.Load() == 0 {
 		t.Fatalf("expected repaired replica to serve searches once caught up")
+	}
+	if staleSnapshotInstalls.Load() == 0 {
+		t.Fatalf("expected repaired replica to receive a snapshot install")
 	}
 }
 
@@ -889,6 +907,56 @@ func TestEffectiveShardSyncConcurrency_AdaptiveAndOverride(t *testing.T) {
 	}
 	if got := s.effectiveShardSyncConcurrency(2); got != 2 {
 		t.Fatalf("expected task-limited override concurrency 2, got %d", got)
+	}
+}
+
+func TestOpenShardIndex_ClosesLeastRecentlyUsedIdleHandles(t *testing.T) {
+	s, _ := newTestHTTPServer(t)
+	s.maxOpenShardIndexes = 1
+	s.indexCacheMinIdle = 0
+
+	day := "2026-03-21"
+	setTestRoute(s, "events", day, 0, []string{"n1"})
+	setTestRoute(s, "events", day, 1, []string{"n1"})
+
+	idx0, err := s.openShardIndex("events", day, 0)
+	if err != nil {
+		t.Fatalf("open shard 0: %v", err)
+	}
+	if err := idx0.Index("doc-0", Document{
+		"id":        "doc-0",
+		"timestamp": day + "T10:00:00Z",
+	}); err != nil {
+		t.Fatalf("index shard 0 doc: %v", err)
+	}
+
+	if _, err := s.openShardIndex("events", day, 1); err != nil {
+		t.Fatalf("open shard 1: %v", err)
+	}
+
+	s.mu.RLock()
+	_, shard0Cached := s.indexes[partitionKey("events", day, 0)]
+	_, shard1Cached := s.indexes[partitionKey("events", day, 1)]
+	cacheSize := len(s.indexes)
+	s.mu.RUnlock()
+
+	if shard0Cached {
+		t.Fatalf("expected shard 0 cache entry to be evicted")
+	}
+	if !shard1Cached || cacheSize != 1 {
+		t.Fatalf("unexpected cache state after trim: shard1=%v size=%d", shard1Cached, cacheSize)
+	}
+
+	idx0Reloaded, err := s.openExistingShardIndex("events", day, 0)
+	if err != nil {
+		t.Fatalf("reopen shard 0 after eviction: %v", err)
+	}
+	count, err := idx0Reloaded.DocCount()
+	if err != nil {
+		t.Fatalf("count reopened shard 0 docs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected shard 0 doc to survive cache eviction, got %d", count)
 	}
 }
 
@@ -1611,6 +1679,9 @@ func setTestRoute(s *Server, indexName, day string, shardID int, replicas []stri
 		Version:   time.Now().UnixNano(),
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
+	_, routingByIndexDay, routingByDay := buildRoutingLookups(s.routing)
+	s.routingByIndexDay = routingByIndexDay
+	s.routingByDay = routingByDay
 }
 
 func setTestPartitionShardCount(s *Server, indexName, day string, shardCount int) {

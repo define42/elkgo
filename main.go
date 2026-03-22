@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"log"
 	"os"
@@ -10,6 +11,14 @@ import (
 )
 
 func main() {
+	if err := run(os.Args[1:]); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run(args []string) error {
+	fs := flag.NewFlagSet("elkgo", flag.ContinueOnError)
+
 	var mode string
 	var nodeID string
 	var listen string
@@ -18,18 +27,20 @@ func main() {
 	var etcdEndpointsRaw string
 	var replicationFactor int
 
-	flag.StringVar(&mode, "mode", "both", "node|coordinator|both")
-	flag.StringVar(&nodeID, "node-id", "n1", "node id")
-	flag.StringVar(&listen, "listen", ":8081", "listen address")
-	flag.StringVar(&publicAddr, "public-addr", envOr("ELKGO_PUBLIC_ADDR", ""), "public address advertised to the cluster")
-	flag.StringVar(&dataDir, "data", "./data", "data directory")
-	flag.StringVar(&etcdEndpointsRaw, "etcd-endpoints", "http://127.0.0.1:2379", "comma-separated etcd endpoints")
-	flag.IntVar(&replicationFactor, "replication-factor", 3, "default replica count for bootstrap")
-	flag.Parse()
+	fs.StringVar(&mode, "mode", "both", "node|coordinator|both")
+	fs.StringVar(&nodeID, "node-id", "n1", "node id")
+	fs.StringVar(&listen, "listen", ":8081", "listen address")
+	fs.StringVar(&publicAddr, "public-addr", envOr("ELKGO_PUBLIC_ADDR", ""), "public address advertised to the cluster")
+	fs.StringVar(&dataDir, "data", "./data", "data directory")
+	fs.StringVar(&etcdEndpointsRaw, "etcd-endpoints", "http://127.0.0.1:2379", "comma-separated etcd endpoints")
+	fs.IntVar(&replicationFactor, "replication-factor", 3, "default replica count for bootstrap")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	endpoints := splitCSV(etcdEndpointsRaw)
 	if len(endpoints) == 0 {
-		log.Fatal("at least one etcd endpoint is required")
+		return errors.New("at least one etcd endpoint is required")
 	}
 
 	s := server.New(server.Config{
@@ -43,9 +54,7 @@ func main() {
 	})
 	defer s.Close()
 
-	if err := s.Run(); err != nil {
-		log.Fatal(err)
-	}
+	return s.Run()
 }
 
 func splitCSV(s string) []string {

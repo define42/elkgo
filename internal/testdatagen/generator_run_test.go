@@ -1,4 +1,4 @@
-package main
+package testdatagen
 
 import (
 	"bufio"
@@ -8,71 +8,39 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"net/url"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"elkgo/internal/testdatagen"
-
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/embed"
-	"net/url"
 )
 
-func TestSplitCSV_TrimsAndDropsEmptyParts(t *testing.T) {
-	got := splitCSV(" http://a:1, ,http://b:2 ,, http://c:3 ")
-	want := []string{"http://a:1", "http://b:2", "http://c:3"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("unexpected splitCSV output: got %#v want %#v", got, want)
-	}
-}
+func TestRun_EndToEndWithEmbeddedEtcd(t *testing.T) {
+	endpoint := startEmbeddedEtcdForGenerator(t)
+	client := newGeneratorEtcdClient(t, endpoint)
 
-func TestEnvOr_UsesEnvironmentWhenPresent(t *testing.T) {
-	const key = "ELKGO_TESTDATA_MAIN_ENV"
-	if err := os.Setenv(key, "from-env"); err != nil {
-		t.Fatalf("set env: %v", err)
-	}
-	defer os.Unsetenv(key)
-
-	if got := envOr(key, "fallback"); got != "from-env" {
-		t.Fatalf("expected env value, got %q", got)
-	}
-
-	if err := os.Setenv(key, "   "); err != nil {
-		t.Fatalf("set blank env: %v", err)
-	}
-	if got := envOr(key, "fallback"); got != "fallback" {
-		t.Fatalf("expected fallback for blank env, got %q", got)
-	}
-}
-
-func TestRun_ValidatesAndSeedsThroughRealHTTPServer(t *testing.T) {
-	if err := run([]string{"-etcd-endpoints=   "}); err == nil || !strings.Contains(err.Error(), "at least one etcd endpoint is required") {
-		t.Fatalf("expected missing endpoint error, got %v", err)
-	}
-
-	endpoint := startEmbeddedEtcdForCmd(t)
-	client := newCmdEtcdClient(t, endpoint)
-	days := testdatagenDaysForMain(t)
-	markerVersion := "cmd-run-test"
-	indexName := testdatagen.DefaultIndexName
+	markerVersion := "run-test"
+	indexName := DefaultIndexName
+	days := testDataDays(time.Now().UTC())
 	for _, day := range days[:len(days)-1] {
-		key := fmt.Sprintf("/distsearch/admin/test-data-loaded/%s/%s/%s", markerVersion, indexName, day)
-		if _, err := client.Put(context.Background(), key, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		markerKey := (&Generator{cfg: Config{IndexName: indexName, MarkerVersion: markerVersion}}).markerKey(day)
+		if _, err := client.Put(context.Background(), markerKey, time.Now().UTC().Format(time.RFC3339)); err != nil {
 			t.Fatalf("preload marker for %s: %v", day, err)
 		}
 	}
 	targetDay := days[len(days)-1]
 
 	var (
-		mu            sync.Mutex
-		bootstrapDays []string
-		bulkDocCount  int
+		mu               sync.Mutex
+		bootstrapDays    []string
+		bulkDocCount     int
+		observedBulkDays []string
 	)
+
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/healthz":
@@ -82,31 +50,52 @@ func TestRun_ValidatesAndSeedsThroughRealHTTPServer(t *testing.T) {
 				"members": map[string]any{"n1": map[string]any{}, "n2": map[string]any{}},
 			})
 		case "/admin/bootstrap":
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			day := strings.TrimSpace(r.URL.Query().Get("day"))
 			mu.Lock()
-			bootstrapDays = append(bootstrapDays, r.URL.Query().Get("day"))
+			bootstrapDays = append(bootstrapDays, day)
 			mu.Unlock()
 			writeJSON(t, w, http.StatusOK, map[string]any{"ok": true})
 		case "/bulk":
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
 			scanner := bufio.NewScanner(r.Body)
 			scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+
 			count := 0
+			bulkDay := ""
 			for scanner.Scan() {
 				line := strings.TrimSpace(scanner.Text())
 				if line == "" {
 					continue
 				}
-				var doc map[string]any
+				var doc Document
 				if err := json.Unmarshal([]byte(line), &doc); err != nil {
 					t.Fatalf("decode bulk doc: %v", err)
 				}
 				count++
+				if bulkDay == "" {
+					if tsValue, ok := doc["timestamp"].(string); ok && len(tsValue) >= len("2006-01-02") {
+						bulkDay = tsValue[:10]
+					}
+				}
 			}
 			if err := scanner.Err(); err != nil {
 				t.Fatalf("scan bulk request: %v", err)
 			}
+
 			mu.Lock()
 			bulkDocCount += count
+			if bulkDay != "" {
+				observedBulkDays = append(observedBulkDays, bulkDay)
+			}
 			mu.Unlock()
+
 			writeJSON(t, w, http.StatusOK, map[string]any{
 				"ok":      true,
 				"index":   indexName,
@@ -120,41 +109,64 @@ func TestRun_ValidatesAndSeedsThroughRealHTTPServer(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	err := run([]string{
-		"-server-url=" + ts.URL,
-		"-index=" + indexName,
-		"-etcd-endpoints=" + endpoint,
-		"-replication-factor=2",
-		"-wait-for-members=2",
-		"-marker-version=" + markerVersion,
+	g := New(Config{
+		ServerURL:         ts.URL,
+		ETCDEndpoints:     []string{endpoint},
+		IndexName:         indexName,
+		ReplicationFactor: 2,
+		WaitForMembers:    2,
+		BulkBatchSize:     DefaultEventsPerDay + 100,
+		WaitTimeout:       10 * time.Second,
+		PollInterval:      10 * time.Millisecond,
+		MarkerVersion:     markerVersion,
 	})
-	if err != nil {
-		t.Fatalf("run returned error: %v", err)
+
+	if err := g.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if g.etcd != nil {
+		t.Fatalf("expected Run to close etcd client")
 	}
 
 	mu.Lock()
 	gotBootstrapDays := append([]string(nil), bootstrapDays...)
 	gotBulkDocCount := bulkDocCount
+	gotBulkDays := append([]string(nil), observedBulkDays...)
 	mu.Unlock()
+
 	if len(gotBootstrapDays) != 1 || gotBootstrapDays[0] != targetDay {
 		t.Fatalf("unexpected bootstrap days: %#v", gotBootstrapDays)
 	}
-	if gotBulkDocCount == 0 {
-		t.Fatalf("expected at least one bulk ingest request")
+	if gotBulkDocCount != len(testDataDocuments(targetDay)) {
+		t.Fatalf("expected %d bulk docs, got %d", len(testDataDocuments(targetDay)), gotBulkDocCount)
+	}
+	if len(gotBulkDays) != 1 || gotBulkDays[0] != targetDay {
+		t.Fatalf("unexpected bulk day observations: %#v", gotBulkDays)
+	}
+
+	for _, day := range days {
+		markerKey := (&Generator{cfg: Config{IndexName: indexName, MarkerVersion: markerVersion}}).markerKey(day)
+		resp, err := client.Get(context.Background(), markerKey)
+		if err != nil {
+			t.Fatalf("get marker for %s: %v", day, err)
+		}
+		if len(resp.Kvs) != 1 {
+			t.Fatalf("expected marker for %s, got %d entries", day, len(resp.Kvs))
+		}
 	}
 }
 
-func startEmbeddedEtcdForCmd(t *testing.T) string {
+func startEmbeddedEtcdForGenerator(t *testing.T) string {
 	t.Helper()
 
 	cfg := embed.NewConfig()
 	cfg.Dir = t.TempDir()
-	cfg.Name = fmt.Sprintf("cmd-etcd-%d", time.Now().UnixNano())
+	cfg.Name = fmt.Sprintf("generator-etcd-%d", time.Now().UnixNano())
 	cfg.LogLevel = "error"
 	cfg.LogOutputs = []string{filepath.Join(cfg.Dir, "etcd.log")}
 
-	clientURL := allocateCmdURL(t)
-	peerURL := allocateCmdURL(t)
+	clientURL := mustAllocateGeneratorURL(t)
+	peerURL := mustAllocateGeneratorURL(t)
 	cfg.ListenClientUrls = []url.URL{clientURL}
 	cfg.AdvertiseClientUrls = []url.URL{clientURL}
 	cfg.ListenPeerUrls = []url.URL{peerURL}
@@ -171,13 +183,15 @@ func startEmbeddedEtcdForCmd(t *testing.T) string {
 		etcd.Close()
 		t.Fatal("timed out waiting for embedded etcd readiness")
 	}
+
 	t.Cleanup(func() {
 		etcd.Close()
 	})
+
 	return "http://" + etcd.Clients[0].Addr().String()
 }
 
-func newCmdEtcdClient(t *testing.T, endpoint string) *clientv3.Client {
+func newGeneratorEtcdClient(t *testing.T, endpoint string) *clientv3.Client {
 	t.Helper()
 
 	client, err := clientv3.New(clientv3.Config{
@@ -193,7 +207,7 @@ func newCmdEtcdClient(t *testing.T, endpoint string) *clientv3.Client {
 	return client
 }
 
-func allocateCmdURL(t *testing.T) url.URL {
+func mustAllocateGeneratorURL(t *testing.T) url.URL {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -207,24 +221,4 @@ func allocateCmdURL(t *testing.T) url.URL {
 		t.Fatalf("parse allocated URL: %v", err)
 	}
 	return *u
-}
-
-func testdatagenDaysForMain(t *testing.T) []string {
-	t.Helper()
-
-	base := time.Now().UTC().Truncate(24 * time.Hour)
-	days := make([]string, 0, testdatagen.DefaultDayCount)
-	for offset := testdatagen.DefaultDayCount - 1; offset >= 0; offset-- {
-		days = append(days, base.AddDate(0, 0, -offset).Format("2006-01-02"))
-	}
-	return days
-}
-
-func writeJSON(t *testing.T, w http.ResponseWriter, status int, v any) {
-	t.Helper()
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		t.Fatalf("encode json response: %v", err)
-	}
 }

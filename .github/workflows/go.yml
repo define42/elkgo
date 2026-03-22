@@ -41,9 +41,13 @@ jobs:
       - name: Lint
         run: make lint
 
-      - name: Run tests with coverage
+      - name: Run unit tests with coverage
         run: |
-          go test -tags=integration ./... -timeout 30m -coverprofile=coverage.out -covermode=atomic -coverpkg=./...
+          go test ./... -coverprofile=coverage.out -covermode=atomic -coverpkg=./...
+
+      - name: Run integration tests
+        run: |
+          go test -tags=integration ./internal/server -timeout 30m
 
       - name: Show coverage in job summary
         run: |

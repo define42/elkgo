@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,6 +29,13 @@ const (
 	integrationTotalEvents       = 10000
 	integrationReplicationFactor = 3
 	integrationIndexName         = "events"
+)
+
+var (
+	integrationImageOnce  sync.Once
+	integrationImageName  string
+	integrationImageMu    sync.Mutex
+	integrationImageBuilt bool
 )
 
 type integrationCluster struct {
@@ -158,8 +166,7 @@ func startIntegrationCluster(t *testing.T, ctx context.Context) integrationClust
 		t.Fatalf("start etcd container: %v", err)
 	}
 
-	imageTag := fmt.Sprintf("integration-%d", time.Now().UnixNano())
-	imageName := "elkgo-integration:" + imageTag
+	imageName, imageTag := integrationTestImage()
 	nodeURLs := make([]string, 0, integrationClusterNodes)
 	nodeContainers := make([]*testcontainers.DockerContainer, 0, integrationClusterNodes)
 
@@ -187,17 +194,20 @@ func startIntegrationCluster(t *testing.T, ctx context.Context) integrationClust
 		}
 
 		var node *testcontainers.DockerContainer
-		if i == 1 {
+		if i == 1 && integrationImageNeedsBuild() {
 			node, err = testcontainers.Run(ctx, "",
 				append(opts, testcontainers.WithDockerfile(testcontainers.FromDockerfile{
 					Context:        repoRoot,
 					Dockerfile:     "Dockerfile",
 					Repo:           "elkgo-integration",
 					Tag:            imageTag,
-					KeepImage:      false,
+					KeepImage:      true,
 					BuildLogWriter: io.Discard,
 				}))...,
 			)
+			if err == nil {
+				markIntegrationImageBuilt()
+			}
 		} else {
 			node, err = testcontainers.Run(ctx, imageName, opts...)
 		}
@@ -221,6 +231,31 @@ func startIntegrationCluster(t *testing.T, ctx context.Context) integrationClust
 		imageName:      imageName,
 		networkName:    net.Name,
 	}
+}
+
+func integrationTestImage() (string, string) {
+	integrationImageOnce.Do(func() {
+		tag := fmt.Sprintf("integration-%d", time.Now().UnixNano())
+		integrationImageName = "elkgo-integration:" + tag
+	})
+
+	parts := strings.SplitN(integrationImageName, ":", 2)
+	if len(parts) != 2 {
+		return integrationImageName, ""
+	}
+	return integrationImageName, parts[1]
+}
+
+func integrationImageNeedsBuild() bool {
+	integrationImageMu.Lock()
+	defer integrationImageMu.Unlock()
+	return !integrationImageBuilt
+}
+
+func markIntegrationImageBuilt() {
+	integrationImageMu.Lock()
+	integrationImageBuilt = true
+	integrationImageMu.Unlock()
 }
 
 func startIntegrationNode(t *testing.T, ctx context.Context, cluster integrationCluster, nodeNumber int) string {

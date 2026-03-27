@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"time"
 
@@ -25,14 +26,25 @@ func New(cfg Config) *Server {
 	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 
 	return &Server{
-		nodeID:                 cfg.NodeID,
-		listen:                 cfg.Listen,
-		publicAddr:             cfg.PublicAddr,
-		dataDir:                cfg.DataDir,
-		mode:                   cfg.Mode,
-		backgroundCtx:          backgroundCtx,
-		backgroundCancel:       backgroundCancel,
-		client:                 &http.Client{Timeout: 8 * time.Second},
+		nodeID:           cfg.NodeID,
+		listen:           cfg.Listen,
+		publicAddr:       cfg.PublicAddr,
+		dataDir:          cfg.DataDir,
+		mode:             cfg.Mode,
+		backgroundCtx:    backgroundCtx,
+		backgroundCancel: backgroundCancel,
+		client: &http.Client{
+			Timeout: 8 * time.Second,
+			Transport: &http.Transport{
+				DialContext: (&net.Dialer{
+					Timeout:   3 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				MaxIdleConns:        256,
+				MaxIdleConnsPerHost: 32,
+				IdleConnTimeout:     90 * time.Second,
+			},
+		},
 		indexes:                map[string]bleve.Index{},
 		replicaCache:           map[string]string{},
 		shardSyncPending:       map[string]int64{},

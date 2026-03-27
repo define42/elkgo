@@ -5,11 +5,17 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"hash/fnv"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+var fnvPool = sync.Pool{
+	New: func() any { return fnv.New32a() },
+}
 
 func (s *Server) routeForDoc(indexName, day, docID string) (int, RoutingEntry, error) {
 	shardID := keyToShard(docID, s.shardCountForPartition(indexName, day))
@@ -268,9 +274,12 @@ func keyToShard(key string, numShards int) int {
 	if numShards <= 0 {
 		return 0
 	}
-	h := fnv.New32a()
+	h := fnvPool.Get().(hash.Hash32)
+	h.Reset()
 	_, _ = h.Write([]byte(key))
-	return int(h.Sum32() % uint32(numShards))
+	shard := int(h.Sum32() % uint32(numShards))
+	fnvPool.Put(h)
+	return shard
 }
 
 func generateRouting(nodes []NodeInfo, numShards int, rf int) map[int][]string {

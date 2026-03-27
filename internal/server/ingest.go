@@ -21,7 +21,16 @@ const (
 	bulkIngestConcurrency = 8
 	routeRetryAttempts    = 5
 	routeRetryDelay       = 100 * time.Millisecond
+	scannerBufInitial     = 64 * 1024
+	scannerBufMax         = 8 * 1024 * 1024
 )
+
+var scannerBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 0, scannerBufInitial)
+		return &buf
+	},
+}
 
 type bulkPreparedItem struct {
 	lineNo    int
@@ -63,8 +72,15 @@ func (s *Server) handleBulkIngest(w http.ResponseWriter, r *http.Request) {
 	}
 	defer bodyReader.Close()
 
+	bufPtr := scannerBufPool.Get().(*[]byte)
 	scanner := bufio.NewScanner(bodyReader)
-	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	scanner.Buffer(*bufPtr, scannerBufMax)
+	defer func() {
+		// Discard oversized buffers to avoid holding excess memory in the pool.
+		if cap(*bufPtr) <= scannerBufInitial*2 {
+			scannerBufPool.Put(bufPtr)
+		}
+	}()
 
 	lineNo := 0
 	indexed := 0

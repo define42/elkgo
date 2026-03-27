@@ -8,8 +8,18 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
+
+var gzipWriterPool = sync.Pool{
+	New: func() any { return gzip.NewWriter(nil) },
+}
+
+// gzipReaderPool has no New function because gzip.NewReader requires a
+// valid reader to parse the header. First call falls back to gzip.NewReader;
+// subsequent calls reuse pooled readers via Reset.
+var gzipReaderPool sync.Pool
 
 func (s *Server) postJSON(ctx context.Context, url string, body any, out any) error {
 	req, err := newStreamingJSONRequest(ctx, http.MethodPost, url, body, true)
@@ -73,7 +83,9 @@ func (s *Server) postNDJSON(ctx context.Context, url string, docs []Document, ou
 }
 
 func (s *Server) postNDJSONWithTimeout(ctx context.Context, url string, docs []Document, timeout time.Duration, out any) error {
-	return postNDJSONWithClient(ctx, &http.Client{Timeout: timeout}, url, docs, out)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return postNDJSONWithClient(ctx, s.client, url, docs, out)
 }
 
 func postNDJSONWithClient(ctx context.Context, client *http.Client, url string, docs []Document, out any) error {
@@ -106,7 +118,9 @@ func (s *Server) streamDocuments(ctx context.Context, url string, onDoc func(Doc
 }
 
 func (s *Server) streamDocumentsWithTimeout(ctx context.Context, url string, timeout time.Duration, onDoc func(Document) error) error {
-	return streamDocumentsWithClient(ctx, &http.Client{Timeout: timeout}, url, onDoc)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return streamDocumentsWithClient(ctx, s.client, url, onDoc)
 }
 
 func streamDocumentsWithClient(ctx context.Context, client *http.Client, url string, onDoc func(Document) error) error {
@@ -140,7 +154,9 @@ func streamDocumentsWithClient(ctx context.Context, client *http.Client, url str
 }
 
 func (s *Server) getJSONWithTimeout(ctx context.Context, url string, timeout time.Duration, out any) error {
-	return getJSONWithClient(ctx, &http.Client{Timeout: timeout}, url, out)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return getJSONWithClient(ctx, s.client, url, out)
 }
 
 func getJSONWithClient(ctx context.Context, client *http.Client, url string, out any) error {
@@ -206,11 +222,13 @@ func newStreamingRequestBody(encode func(io.Writer) error, contentType string, c
 	go func() {
 		var err error
 		if compress {
-			gzipWriter := gzip.NewWriter(pw)
+			gzipWriter := gzipWriterPool.Get().(*gzip.Writer)
+			gzipWriter.Reset(pw)
 			err = encode(gzipWriter)
 			if closeErr := gzipWriter.Close(); err == nil && closeErr != nil {
 				err = closeErr
 			}
+			gzipWriterPool.Put(gzipWriter)
 		} else {
 			err = encode(pw)
 		}
@@ -224,17 +242,40 @@ func requestBodyReader(r *http.Request) (io.ReadCloser, error) {
 	if strings.ToLower(r.Header.Get("Content-Encoding")) != "gzip" {
 		return r.Body, nil
 	}
+
+	if pooled, ok := gzipReaderPool.Get().(*gzip.Reader); ok {
+		if err := pooled.Reset(r.Body); err != nil {
+			gzipReaderPool.Put(pooled)
+			return nil, err
+		}
+		return &pooledGzipReadCloser{
+			Reader: pooled,
+			body:   r.Body,
+		}, nil
+	}
+
 	reader, err := gzip.NewReader(r.Body)
 	if err != nil {
 		return nil, err
 	}
-	return &compositeReadCloser{
+	return &pooledGzipReadCloser{
 		Reader: reader,
-		closers: []io.Closer{
-			reader,
-			r.Body,
-		},
+		body:   r.Body,
 	}, nil
+}
+
+type pooledGzipReadCloser struct {
+	*gzip.Reader
+	body io.ReadCloser
+}
+
+func (p *pooledGzipReadCloser) Close() error {
+	err := p.Reader.Close()
+	gzipReaderPool.Put(p.Reader)
+	if bodyErr := p.body.Close(); err == nil {
+		err = bodyErr
+	}
+	return err
 }
 
 func decodeJSONRequest(r *http.Request, out any) error {
